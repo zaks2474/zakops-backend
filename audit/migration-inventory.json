@@ -1,0 +1,42 @@
+{
+  "timestamp": "2026-01-19T15:27:39.613495",
+  "base_path": "/home/zaks/zakops-backend",
+  "sqlite_databases": [],
+  "data_directories": [],
+  "file_counts": {},
+  "total_records": {},
+  "recommendations": [
+    {
+      "priority": "info",
+      "type": "existing_data",
+      "message": "PostgreSQL already has 113 records"
+    },
+    {
+      "priority": "info",
+      "type": "deal_id_complete",
+      "message": "All deals have deal_id assigned"
+    },
+    {
+      "priority": "info",
+      "type": "no_migration_needed",
+      "message": "No legacy data found - migration not necessary"
+    }
+  ],
+  "postgresql": {
+    "connected": true,
+    "record_counts": {
+      "zakops.deals": 5,
+      "zakops.actions": 83,
+      "zakops.artifacts": 0,
+      "zakops.agent_runs": 0,
+      "zakops.agent_threads": 0,
+      "zakops.deal_events": 20,
+      "zakops.outbox": 5
+    },
+    "total_records": 113,
+    "deal_id_coverage": {
+      "total_deals": 5,
+      "with_deal_id": 5
+    }
+  }
+}
