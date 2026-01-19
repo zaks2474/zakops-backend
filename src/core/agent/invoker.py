@@ -2,6 +2,7 @@
 Agent Invoker
 
 Main entry point for agent invocation.
+Phase 15: Added OpenTelemetry tracing.
 """
 
 import asyncio
@@ -14,6 +15,8 @@ import time
 
 from ..database.adapter import get_database
 from ..hitl import assess_risk, RiskLevel
+from ..observability.tracing import create_span, traced, add_correlation_id_to_span
+from ..observability.metrics import record_counter, record_histogram
 from .models import (
     AgentRun, AgentRunRequest, AgentRunResponse, AgentRunStatus,
     ToolCall, ToolResult
@@ -38,6 +41,7 @@ class AgentInvoker:
     def __init__(self, tool_registry: ToolRegistry = None):
         self.tool_registry = tool_registry or get_tool_registry()
 
+    @traced("agent.invoke")
     async def invoke(
         self,
         request: AgentRunRequest,
@@ -56,6 +60,9 @@ class AgentInvoker:
         # Generate trace_id if not provided
         trace_id = trace_id or request.trace_id or f"trace-{uuid4().hex[:12]}"
         correlation_id = str(request.deal_id)
+
+        # Add correlation context to the current span
+        add_correlation_id_to_span(correlation_id)
 
         # Create agent run record
         run = AgentRun(
@@ -123,6 +130,14 @@ class AgentInvoker:
         # Update run in database
         await self._update_run(run)
 
+        # Record metrics
+        record_counter("agent_invocations_total", 1, {
+            "status": run.status.value
+        })
+        record_histogram("agent_run_duration_seconds", run.duration_ms / 1000, {
+            "status": run.status.value
+        })
+
         return run.to_response(
             tool_calls=callback.tool_calls,
             actions=actions_created
@@ -147,41 +162,57 @@ class AgentInvoker:
         """
         context = run.context or {}
 
-        # Step 1: Fetch deal info
-        tool_call = await callback.on_tool_start("fetch_deal_info", {"deal_id": str(run.deal_id)})
-        start = time.time()
+        with create_span("agent.execute", {"deal_id": str(run.deal_id)}) as span:
+            # Step 1: Fetch deal info
+            with create_span("tool.fetch_deal_info") as tool_span:
+                tool_call = await callback.on_tool_start("fetch_deal_info", {"deal_id": str(run.deal_id)})
+                start = time.time()
 
-        try:
-            result = await self.tool_registry.execute("fetch_deal_info", {"deal_id": str(run.deal_id)})
-            await callback.on_tool_end(tool_call, result, duration_ms=int((time.time() - start) * 1000))
-        except Exception as e:
-            await callback.on_tool_end(tool_call, None, error=str(e), duration_ms=int((time.time() - start) * 1000))
+                try:
+                    result = await self.tool_registry.execute("fetch_deal_info", {"deal_id": str(run.deal_id)})
+                    await callback.on_tool_end(tool_call, result, duration_ms=int((time.time() - start) * 1000))
+                    tool_span.set_attribute("tool.success", True)
+                except Exception as e:
+                    await callback.on_tool_end(tool_call, None, error=str(e), duration_ms=int((time.time() - start) * 1000))
+                    tool_span.set_attribute("tool.success", False)
+                    tool_span.set_attribute("tool.error", str(e))
 
-        # Step 2: List documents
-        tool_call = await callback.on_tool_start("list_documents", {"deal_id": str(run.deal_id)})
-        start = time.time()
+            # Step 2: List documents
+            with create_span("tool.list_documents") as tool_span:
+                tool_call = await callback.on_tool_start("list_documents", {"deal_id": str(run.deal_id)})
+                start = time.time()
 
-        try:
-            docs = await self.tool_registry.execute("list_documents", {"deal_id": str(run.deal_id)})
-            await callback.on_tool_end(tool_call, docs, duration_ms=int((time.time() - start) * 1000))
-        except Exception as e:
-            await callback.on_tool_end(tool_call, None, error=str(e), duration_ms=int((time.time() - start) * 1000))
+                try:
+                    docs = await self.tool_registry.execute("list_documents", {"deal_id": str(run.deal_id)})
+                    await callback.on_tool_end(tool_call, docs, duration_ms=int((time.time() - start) * 1000))
+                    tool_span.set_attribute("tool.success", True)
+                except Exception as e:
+                    await callback.on_tool_end(tool_call, None, error=str(e), duration_ms=int((time.time() - start) * 1000))
+                    tool_span.set_attribute("tool.success", False)
+                    tool_span.set_attribute("tool.error", str(e))
 
-        # Step 3: Create a task action based on analysis
-        task_action = await self._create_action(
-            deal_id=run.deal_id,
-            trace_id=run.trace_id,
-            action_type="create_task",
-            action_data={
-                "title": f"Review: {run.task}",
-                "description": f"Agent-generated task from run {run.id}",
-                "priority": "medium"
-            },
-            callback=callback
-        )
+            # Step 3: Create a task action based on analysis
+            with create_span("agent.create_action") as action_span:
+                task_action = await self._create_action(
+                    deal_id=run.deal_id,
+                    trace_id=run.trace_id,
+                    action_type="create_task",
+                    action_data={
+                        "title": f"Review: {run.task}",
+                        "description": f"Agent-generated task from run {run.id}",
+                        "priority": "medium"
+                    },
+                    callback=callback
+                )
 
-        if task_action:
-            actions_created.append(task_action)
+                if task_action:
+                    actions_created.append(task_action)
+                    action_span.set_attribute("action.created", True)
+                    record_counter("actions_created_total", 1, {"type": "create_task"})
+                else:
+                    action_span.set_attribute("action.created", False)
+
+            span.set_attribute("actions_created", len(actions_created))
 
         return {
             "summary": f"Analyzed deal and created {len(actions_created)} action(s)",

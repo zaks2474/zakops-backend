@@ -32,6 +32,12 @@ from .routers.invoke import router as agent_router
 # Phase 13: Production Hardening
 from .routers.admin import router as admin_router
 from ..shared.security import SecurityMiddleware
+# Phase 15: Observability
+from ..shared.middleware import TracingMiddleware
+# Phase 16: Feature Development
+from .routers.workflow import router as workflow_router
+from .routers.search import router as search_router
+from .routers.timeline import router as timeline_router
 
 # Configuration
 DB_URL = os.environ.get(
@@ -199,6 +205,46 @@ def record_to_dict(record: asyncpg.Record) -> Dict[str, Any]:
 
 
 # =============================================================================
+# OBSERVABILITY INITIALIZATION
+# =============================================================================
+
+def init_observability():
+    """Initialize observability components (tracing, metrics, logging)."""
+    from ...core.observability import init_tracing, init_metrics, configure_logging
+
+    # Get OTel config from environment
+    otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    otel_enabled = os.getenv("OTEL_ENABLED", "false").lower() == "true"
+    console_export = os.getenv("OTEL_CONSOLE_EXPORT", "false").lower() == "true"
+    log_level = os.getenv("LOG_LEVEL", "INFO")
+    log_structured = os.getenv("LOG_STRUCTURED", "true").lower() == "true"
+
+    # Configure structured logging first
+    configure_logging(
+        level=log_level,
+        structured=log_structured,
+        service_name="zakops-backend"
+    )
+
+    # Initialize tracing if enabled
+    if otel_enabled or otlp_endpoint:
+        init_tracing(
+            service_name="zakops-backend",
+            service_version=os.getenv("APP_VERSION", "1.0.0"),
+            otlp_endpoint=otlp_endpoint,
+            console_export=console_export
+        )
+
+        init_metrics(
+            service_name="zakops-backend",
+            otlp_endpoint=otlp_endpoint,
+            console_export=console_export
+        )
+
+        print("OpenTelemetry observability initialized")
+
+
+# =============================================================================
 # LIFESPAN
 # =============================================================================
 
@@ -206,6 +252,9 @@ def record_to_dict(record: asyncpg.Record) -> Dict[str, Any]:
 async def lifespan(app: FastAPI):
     """Manage application lifespan - startup and shutdown."""
     global db_pool
+
+    # Initialize observability
+    init_observability()
 
     # Startup
     print(f"Connecting to PostgreSQL: {DB_URL.split('@')[1] if '@' in DB_URL else DB_URL}")
@@ -249,6 +298,9 @@ app.add_middleware(
 register_error_handlers(app)
 app.add_middleware(TraceMiddleware)
 
+# Phase 15: OpenTelemetry tracing middleware
+app.add_middleware(TracingMiddleware)
+
 # Phase 7: Authentication middleware (after trace, before routes)
 app.add_middleware(AuthMiddleware)
 
@@ -263,6 +315,11 @@ app.include_router(agent_router)
 
 # Phase 13: Admin/operator endpoints
 app.include_router(admin_router)
+
+# Phase 16: Feature Development - Workflow, Search, Timeline
+app.include_router(workflow_router)
+app.include_router(search_router)
+app.include_router(timeline_router)
 
 # Phase 13: Security middleware
 app.add_middleware(SecurityMiddleware)
