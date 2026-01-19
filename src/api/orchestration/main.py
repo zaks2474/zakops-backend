@@ -27,6 +27,8 @@ from ..shared.routers.auth import router as auth_router
 # Phase 8: Health endpoints
 from ..shared.routers.health import router as health_router
 from ..shared.openapi import setup_openapi
+# Phase 10: Agent Integration
+from .routers.invoke import router as agent_router
 
 # Configuration
 DB_URL = os.environ.get(
@@ -252,6 +254,9 @@ app.include_router(auth_router)
 
 # Phase 8: Health endpoints
 app.include_router(health_router)
+
+# Phase 10: Agent Integration
+app.include_router(agent_router)
 
 # Setup custom OpenAPI schema
 setup_openapi(app)
