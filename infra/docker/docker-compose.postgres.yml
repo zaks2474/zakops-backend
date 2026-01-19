@@ -1,0 +1,34 @@
+# ZakOps PostgreSQL Configuration
+#
+# NOTE: An existing PostgreSQL container (deal-engine-db) is already running
+# on port 5435 with the zakops database. This file is provided for:
+# 1. Documentation of the expected configuration
+# 2. Fresh deployments where no PostgreSQL exists
+#
+# Connection string: postgresql://dealengine:changeme@localhost:5435/zakops
+#
+# To start a fresh instance (if needed):
+#   docker compose -f docker-compose.postgres.yml up -d
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: zakops-postgres
+    environment:
+      POSTGRES_DB: zakops
+      POSTGRES_USER: dealengine
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dealengine -d zakops"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
