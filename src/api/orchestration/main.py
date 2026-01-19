@@ -21,6 +21,11 @@ from pydantic import BaseModel, Field, ConfigDict
 
 # Phase 5: API Stabilization - Middleware imports
 from ..shared.middleware import register_error_handlers, TraceMiddleware
+# Phase 7: Authentication - Middleware and router imports
+from ..shared.middleware import AuthMiddleware
+from ..shared.routers.auth import router as auth_router
+# Phase 8: Health endpoints
+from ..shared.routers.health import router as health_router
 from ..shared.openapi import setup_openapi
 
 # Configuration
@@ -238,6 +243,15 @@ app.add_middleware(
 # Phase 5: API Stabilization - Error handlers and trace middleware
 register_error_handlers(app)
 app.add_middleware(TraceMiddleware)
+
+# Phase 7: Authentication middleware (after trace, before routes)
+app.add_middleware(AuthMiddleware)
+
+# Phase 7: Auth router
+app.include_router(auth_router)
+
+# Phase 8: Health endpoints
+app.include_router(health_router)
 
 # Setup custom OpenAPI schema
 setup_openapi(app)
