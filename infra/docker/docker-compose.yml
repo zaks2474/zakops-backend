@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: zakops-postgres
+    environment:
+      POSTGRES_DB: zakops
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-zakops_secure_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  deal-lifecycle-api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.api
+    container_name: zakops-deal-lifecycle-api
+    command: ["python", "-m", "uvicorn", "src.api.deal_lifecycle.main:app", "--host", "0.0.0.0", "--port", "8090"]
+    environment:
+      - DATABASE_URL=postgresql://postgres:${DB_PASSWORD:-zakops_secure_pass}@postgres:5432/zakops
+      - DATAROOM_ROOT=/var/lib/zakops/dataroom
+      - OPENAI_API_BASE=http://host.docker.internal:8000/v1
+    ports:
+      - "8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - artifact_data:/var/lib/zakops/dataroom
+      - ${DATAROOM_ROOT:-/home/zaks/DataRoom}:/home/zaks/DataRoom:ro
+
+  mcp-agent-bridge:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.api
+    container_name: zakops-mcp-bridge
+    command: ["python", "src/agent/bridge/mcp_server.py"]
+    environment:
+      - ZAKOPS_BRIDGE_HOST=0.0.0.0
+      - ZAKOPS_BRIDGE_PORT=9100
+      - ZAKOPS_DEAL_API_URL=http://deal-lifecycle-api:8090
+      - ZAKOPS_RAG_API_URL=http://host.docker.internal:8052
+      - DATAROOM_ROOT=/var/lib/zakops/dataroom
+    ports:
+      - "9100:9100"
+    depends_on:
+      - deal-lifecycle-api
+    volumes:
+      - artifact_data:/var/lib/zakops/dataroom
+
+  actions-runner:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.api
+    container_name: zakops-actions-runner
+    command: ["python", "src/workers/actions_runner.py"]
+    environment:
+      - DATABASE_URL=postgresql://postgres:${DB_PASSWORD:-zakops_secure_pass}@postgres:5432/zakops
+      - DATAROOM_ROOT=/var/lib/zakops/dataroom
+    depends_on:
+      postgres:
+        condition: service_healthy
+      deal-lifecycle-api:
+        condition: service_started
+    volumes:
+      - artifact_data:/var/lib/zakops/dataroom
+
+volumes:
+  postgres_data:
+  artifact_data:

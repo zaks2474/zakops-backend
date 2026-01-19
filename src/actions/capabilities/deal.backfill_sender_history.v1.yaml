@@ -1,0 +1,71 @@
+capability_id: deal.backfill_sender_history.v1
+title: Backfill sender history after deal approval
+description: >
+  After a deal is approved from an inbound triage email, scan historical Gmail
+  messages from the same sender and decide whether they belong to the same deal
+  (auto-append materials) or represent a different/uncertain deal (create new
+  quarantine review items for operator approval). Local-only: uses the local
+  vLLM (Qwen) for linking decisions and never calls cloud LLM providers.
+action_type: DEAL.BACKFILL_SENDER_HISTORY
+
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    deal_id:
+      type: string
+      description: Target deal id (required).
+    approved_message_id:
+      type: string
+      description: Gmail message id that was approved to create the deal.
+    sender_email:
+      type: string
+      description: Sender email address to scan (required).
+    lookback_days:
+      type: integer
+      description: Lookback window for sender history scan (default 365).
+    max_messages:
+      type: integer
+      description: Max messages to consider from search (default 50).
+    mode:
+      type: string
+      enum: [same_deal_only, classify_and_quarantine]
+      description: >
+        same_deal_only appends only confident matches; classify_and_quarantine
+        creates quarantine review actions for different/uncertain candidates.
+    min_confidence_same:
+      type: number
+      description: Confidence threshold for auto-append + deterministic mapping (default 0.9).
+    max_thread_messages:
+      type: integer
+      description: Max messages from a thread to include in LLM linking prompt (default 25).
+  required: [deal_id, sender_email]
+
+output_artifacts:
+  - kind: md
+    extension: .md
+    mime_type: text/markdown
+    required: false
+    description: Backfill run report (summary).
+  - kind: json
+    extension: .json
+    mime_type: application/json
+    required: false
+    description: Backfill run report (structured).
+
+risk_level: low
+required_approval: false
+llm_allowed: true
+cloud_required: false
+
+constraints:
+  - Local-only LLM (vLLM). Never call cloud LLM providers.
+  - Never send or delete emails.
+  - Do not create new deals directly; only append materials or create quarantine review actions.
+  - Must be idempotent (reruns do not duplicate actions or bundles).
+
+tags:
+  - deal
+  - email
+  - backfill
+  - triage

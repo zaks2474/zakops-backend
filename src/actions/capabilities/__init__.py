@@ -1,0 +1,2 @@
+"""Capability manifests and registry."""
+

@@ -1,0 +1,61 @@
+capability_id: communication.draft_email.v1
+title: Draft broker email (draft-only)
+description: >
+  Create a broker-facing email draft for a deal workflow. This capability NEVER sends email automatically.
+  It creates artifacts (MD/DOCX) that the operator can review and copy/paste into the outbound channel.
+action_type: COMMUNICATION.DRAFT_EMAIL
+
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    to:
+      type: string
+      title: Recipient email
+      description: Broker/counterparty email address.
+    subject:
+      type: string
+      title: Subject
+    context:
+      type: string
+      title: Context / request
+      description: What should the email ask for or communicate?
+    tone:
+      type: string
+      title: Tone
+      enum: [professional, friendly, formal]
+      default: professional
+  required: [to, subject, context]
+
+output_artifacts:
+  - kind: md
+    extension: .md
+    mime_type: text/markdown
+    required: true
+    description: Draft body in markdown.
+  - kind: docx
+    extension: .docx
+    mime_type: application/vnd.openxmlformats-officedocument.wordprocessingml.document
+    required: false
+    description: Optional DOCX copy of the draft (if python-docx available).
+
+risk_level: medium
+required_approval: true
+deterministic_steps:
+  - Validate required fields (to/subject/context)
+  - Secret-scan gate before any cloud call
+  - Generate draft body (Gemini Pro only when cloud enabled)
+  - Save artifacts under deal folder
+llm_allowed: true
+cloud_required: true
+
+examples:
+  - user_intent: Draft an email to the broker requesting the CIM and last-twelve-month financials.
+    expected: Create a draft email asking for CIM + LTM financials, with a professional tone.
+  - user_intent: Write a follow-up email asking if they have any update on the NDA.
+    expected: Create a short follow-up draft referencing NDA status.
+
+constraints:
+  - Never send email automatically (draft-only).
+  - If cloud is disabled, fail with a clear reason instead of hallucinating a draft.
+  - Do not include secrets in any cloud request.

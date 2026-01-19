@@ -1,0 +1,27 @@
+[Unit]
+Description=ZakOps Agent Bridge - MCP Server (FastMCP) for LangSmith Integration
+Documentation=file:///home/zaks/scripts/agent_bridge/README.md
+After=network.target zakops-api.service
+Wants=zakops-api.service
+
+[Service]
+Type=simple
+User=zaks
+Group=zaks
+WorkingDirectory=/home/zaks/scripts/agent_bridge
+EnvironmentFile=/home/zaks/scripts/agent_bridge/.env
+ExecStart=/usr/bin/python3 /home/zaks/scripts/agent_bridge/mcp_server.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/var/log/zakops/agent-bridge.log
+StandardError=append:/var/log/zakops/agent-bridge.log
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/zaks/DataRoom
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,59 @@
+capability_id: communication.send_email.v1
+title: Send email (ToolGateway)
+description: >
+  Send an outbound email via a manifested ToolGateway tool (default: gmail__send_email).
+  This capability is irreversible and ALWAYS requires explicit operator approval.
+action_type: COMMUNICATION.SEND_EMAIL
+
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    to:
+      type: string
+      title: Recipient(s)
+      description: One or more email addresses (comma/semicolon separated).
+    subject:
+      type: string
+      title: Subject
+    body:
+      type: string
+      title: Body
+      description: Email body. If omitted, provide body_artifact_path.
+    body_artifact_path:
+      type: string
+      title: Body artifact path
+      description: Path to an existing draft artifact under DATAROOM_ROOT (preferred when sending a reviewed draft).
+  required: [to, subject]
+
+output_artifacts:
+  - kind: md
+    extension: .md
+    mime_type: text/markdown
+    required: true
+    description: The sent email content captured for audit.
+  - kind: json
+    extension: .json
+    mime_type: application/json
+    required: true
+    description: Tool invocation output (message id, thread id, etc.).
+
+risk_level: high
+required_approval: true
+deterministic_steps:
+  - Validate recipients and required fields
+  - Load body from artifact (optional)
+  - Secret-scan gate before ToolGateway invoke
+  - Invoke ToolGateway send tool (irreversible)
+  - Save send artifacts under DataRoom
+llm_allowed: false
+
+examples:
+  - user_intent: Send the last drafted email to broker@example.com
+    expected: Create a SEND_EMAIL action referencing the last draft artifact and send via ToolGateway after approval.
+
+constraints:
+  - Never send without explicit operator approval.
+  - ToolGateway must be enabled and allowlisted for the configured send tool.
+  - Secret-scan blocks sends containing secrets.
+

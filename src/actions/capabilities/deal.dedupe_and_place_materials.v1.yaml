@@ -1,0 +1,44 @@
+capability_id: deal.dedupe_and_place_materials.v1
+title: Dedupe + place deal materials (derived views)
+description: >
+  Builds derived, deal-centric folder views from a correspondence bundle by copying safe attachments into
+  top-level deal folders (e.g., 01-NDA/02-CIM/03-Financials) using deterministic filename heuristics.
+  Originals remain under the correspondence bundle for audit/provenance.
+action_type: DEAL.DEDUPE_AND_PLACE_MATERIALS
+
+input_schema:
+  type: object
+  additionalProperties: true
+  properties:
+    deal_id:
+      type: string
+      description: Deal id (optional if payload.deal_id present).
+    deal_path:
+      type: string
+      description: Deal folder path (optional if ctx.deal.folder_path present).
+    bundle_path:
+      type: string
+      description: Path to the correspondence bundle directory (required).
+  required: [bundle_path]
+
+output_artifacts:
+  - kind: json
+    extension: .json
+    mime_type: application/json
+    required: true
+    description: Placement manifest saved under <bundle>/placed_materials.json
+
+risk_level: low
+required_approval: false
+llm_allowed: false
+
+constraints:
+  - Never delete or overwrite original bundle attachments.
+  - Only copy safe attachment types into derived views.
+  - "Idempotent: reruns must not duplicate placed artifacts."
+
+tags:
+  - deal
+  - materials
+  - ingestion
+  - deterministic

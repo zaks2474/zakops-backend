@@ -1,0 +1,66 @@
+capability_id: deal.extract_email_artifacts.v1
+title: Extract entities + doc types from inbound email artifacts (local-only)
+description: >
+  Post-approval follow-on step for a deal created from an inbound email.
+  Performs cheap, local-only extraction and classification over the email artifacts
+  and attachments to produce a small structured output set (summary + entities + doc types).
+action_type: DEAL.EXTRACT_EMAIL_ARTIFACTS
+
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    deal_id:
+      type: string
+      title: Deal ID
+      description: Deal identifier (if not already provided on the action payload).
+    deal_path:
+      type: string
+      title: Deal path
+      description: Absolute path to the deal folder (optional fallback).
+    artifact_paths:
+      type: array
+      title: Artifact paths
+      items: { type: string }
+      description: Absolute paths to email/attachment artifacts to scan.
+    max_read_bytes:
+      type: integer
+      title: Max bytes per file
+      default: 200000
+  required: [artifact_paths]
+
+output_artifacts:
+  - kind: md
+    extension: .md
+    mime_type: text/markdown
+    required: true
+    description: Human-readable extraction summary.
+  - kind: json
+    extension: .json
+    mime_type: application/json
+    required: true
+    description: Extracted entities (company, broker, key numbers) and signals.
+  - kind: json
+    extension: .json
+    mime_type: application/json
+    required: true
+    description: Detected document types and confidence per artifact.
+
+risk_level: low
+required_approval: false
+deterministic_steps:
+  - Scan filenames and lightweight text previews (local-only)
+  - Detect likely doc types (CIM/teaser/NDA/financials/etc.)
+  - Extract key numeric signals (ARR/EBITDA/revenue mentions) via regex
+  - Write summary + JSON outputs under deal/99-ACTIONS/{action_id}/
+llm_allowed: false
+
+examples:
+  - user_intent: Extract what we can from the inbound email attachments after creating the deal.
+    expected: Create extracted_summary.md + extracted_entities.json + detected_doc_types.json.
+  - user_intent: Identify whether the attachments include an NDA, teaser, CIM, or financials.
+    expected: Detect doc types from filenames and produce a structured classification JSON.
+
+constraints:
+  - "Local-only: no cloud calls."
+  - Best-effort extraction; never fail the whole action due to one unreadable file.

@@ -1,0 +1,47 @@
+capability_id: email_triage.reject_email.v1
+title: Reject email as non-deal (labels + thread block)
+description: >
+  Marks an email as non-deal by applying Gmail labels and recording the Gmail thread id
+  for deterministic auto-rejection of future emails in that thread. Never deletes emails.
+action_type: EMAIL_TRIAGE.REJECT_EMAIL
+
+input_schema:
+  type: object
+  additionalProperties: true
+  properties:
+    message_id:
+      type: string
+      description: Gmail message id (required).
+    thread_id:
+      type: string
+      description: Gmail thread id.
+    reason:
+      type: string
+      description: Rejection reason for audit trail.
+    labels_to_add:
+      type: array
+      items: { type: string }
+      default: ["ZakOps/NonDeal", "ZakOps/Processed"]
+    labels_to_remove:
+      type: array
+      items: { type: string }
+      default: ["ZakOps/Deal", "ZakOps/Quarantine"]
+  required: [message_id]
+
+risk_level: medium
+required_approval: true
+cloud_required: true
+llm_allowed: false
+
+constraints:
+  - Never send email automatically.
+  - Never delete emails automatically.
+  - Apply Gmail labels only after explicit approval (this is a Kinetic Action).
+  - Record thread_to_non_deal mapping for deterministic future routing.
+
+tags:
+  - email
+  - triage
+  - quarantine
+  - governance
+

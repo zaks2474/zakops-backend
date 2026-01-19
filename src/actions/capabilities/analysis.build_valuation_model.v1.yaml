@@ -1,0 +1,50 @@
+capability_id: analysis.build_valuation_model.v1
+title: Build valuation model (XLSX)
+description: >
+  Generate or update a lightweight XLSX valuation model template populated from known deal fields
+  (asking price, EBITDA, revenue) when available. Produces a downloadable XLSX artifact.
+action_type: ANALYSIS.BUILD_VALUATION_MODEL
+
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    revenue:
+      type: number
+      title: Revenue
+    ebitda:
+      type: number
+      title: EBITDA
+    multiple:
+      type: number
+      title: EBITDA multiple
+      default: 5.0
+    notes:
+      type: string
+      title: Notes
+  required: []
+
+output_artifacts:
+  - kind: xlsx
+    extension: .xlsx
+    mime_type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+    required: true
+    description: Valuation model workbook.
+
+risk_level: medium
+required_approval: true
+deterministic_steps:
+  - Gather deal financial fields from registry/case file if present
+  - Generate XLSX template deterministically (no cloud required)
+  - Save artifact under deal folder
+llm_allowed: false
+
+examples:
+  - user_intent: Build a valuation model for this deal.
+    expected: Create an XLSX with inputs and valuation output using default multiple.
+  - user_intent: Create an EBITDA multiple model at 6.0x.
+    expected: Create XLSX with multiple preset to 6.0.
+
+constraints:
+  - Do not overwrite existing models without operator confirmation (new file per action_id).
+

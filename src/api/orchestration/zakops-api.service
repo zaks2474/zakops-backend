@@ -1,0 +1,31 @@
+[Unit]
+Description=ZakOps Orchestration API
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=zaks
+Group=zaks
+WorkingDirectory=/home/zaks/scripts/api
+Environment="DATABASE_URL=postgresql://dealengine:changeme@localhost:5435/zakops"
+Environment="API_HOST=0.0.0.0"
+Environment="API_PORT=9200"
+ExecStart=/usr/bin/python3 -c "import uvicorn; uvicorn.run('main:app', host='0.0.0.0', port=9200)"
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zakops-api
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/zaks/scripts/api /var/log/zakops
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

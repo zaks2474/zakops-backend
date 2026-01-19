@@ -1,0 +1,45 @@
+capability_id: rag.reindex_deal.v1
+title: Reindex deal artifacts into RAG (incremental, secret-scan)
+description: >
+  Incrementally indexes newly-added deal artifacts into the local RAG service.
+  Uses a per-deal .rag_indexed_files.json manifest to avoid re-indexing unchanged files.
+  Blocks secret-like content from entering the index.
+action_type: RAG.REINDEX_DEAL
+
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    deal_id:
+      type: string
+      description: Deal ID (required if ctx.deal not available).
+    deal_path:
+      type: string
+      description: Absolute path to the deal folder (optional fallback).
+    artifact_paths:
+      type: array
+      items: { type: string }
+      description: Absolute paths to newly added text artifacts to index (md/txt/json/csv/yaml).
+    bundle_path:
+      type: string
+      description: Optional correspondence bundle path to enumerate for text artifacts.
+    max_files:
+      type: integer
+      description: Max files to index in this run (default 50).
+      default: 50
+  required: []
+
+risk_level: low
+required_approval: false
+llm_allowed: false
+cloud_required: false
+
+constraints:
+  - Local-only (calls local RAG REST API, not cloud).
+  - Secret-scan required; never index secret-like content.
+  - "Incremental: never re-index unchanged files."
+
+tags:
+  - rag
+  - indexing
+  - deal

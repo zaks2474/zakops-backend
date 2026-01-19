@@ -1,0 +1,88 @@
+capability_id: email_triage.review_email.v1
+title: Review inbound deal email (quarantine gate)
+description: >
+  Approval-gated intake for inbound deal-signal emails. On approval, the system creates a Deal workspace,
+  registers the Deal in the existing Deal Registry, and persists the source email + attachments under the
+  deal folder. This capability NEVER sends email and NEVER deletes messages.
+action_type: EMAIL_TRIAGE.REVIEW_EMAIL
+
+input_schema:
+  type: object
+  additionalProperties: true
+  properties:
+    message_id:
+      type: string
+      description: Gmail message id.
+    thread_id:
+      type: string
+      description: Gmail thread id.
+    from:
+      type: string
+      description: From header.
+    to:
+      type: string
+      description: To header.
+    date:
+      type: string
+      description: Email received timestamp (best-effort).
+    subject:
+      type: string
+      description: Email subject.
+    company:
+      type: string
+      description: Best-effort company/deal name extracted by triage.
+    classification:
+      type: string
+      description: Triage classification label.
+    urgency:
+      type: string
+      description: LOW|MED|HIGH.
+    links:
+      type: array
+      description: Extracted links (querystrings stripped).
+      items:
+        type: object
+        additionalProperties: true
+    attachments:
+      type: array
+      description: Attachment metadata (download occurs only for safe types).
+      items:
+        type: object
+        additionalProperties: true
+    quarantine_dir:
+      type: string
+      description: Filesystem path to the quarantine directory for this message.
+  required: [message_id, subject]
+
+output_artifacts:
+  - kind: md
+    extension: .md
+    mime_type: text/markdown
+    required: true
+    description: Email intake markdown saved under the deal folder.
+  - kind: json
+    extension: .json
+    mime_type: application/json
+    required: true
+    description: Email intake manifest saved under the deal folder.
+
+risk_level: medium
+required_approval: true
+deterministic_steps:
+  - Validate required inputs
+  - Create/resolve deal workspace (Inbound)
+  - Persist email + attachments under deal folder
+  - Update Deal Registry mapping (message_id -> deal_id)
+llm_allowed: false
+
+constraints:
+  - Never send email automatically.
+  - Never delete emails automatically.
+  - "No silent drops: on failure, action must surface a clear error."
+
+tags:
+  - email
+  - triage
+  - intake
+  - quarantine
+  - deal

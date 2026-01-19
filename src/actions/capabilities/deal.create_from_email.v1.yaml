@@ -1,0 +1,116 @@
+capability_id: deal.create_from_email.v1
+title: Create deal from approved email (quarantine → deal)
+description: >
+  Convert an approved, acquisition-related inbound email into a real Deal workspace:
+  create a deal folder under the DataRoom pipeline, write a Deal Registry record, and
+  copy the quarantined email artifacts (and safe attachments) into the deal’s correspondence area.
+  This capability is deterministic and idempotent (re-running does not create duplicates).
+action_type: DEAL.CREATE_FROM_EMAIL
+
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    gmail_message_id:
+      type: string
+      title: Gmail message ID
+    gmail_thread_id:
+      type: string
+      title: Gmail thread ID
+    subject:
+      type: string
+      title: Subject
+    from_email:
+      type: string
+      title: Sender email
+      description: Best-effort extracted email address for the sender/broker.
+    from_header:
+      type: string
+      title: Sender header
+      description: "Raw From: header (optional; for display)."
+    received_at:
+      type: string
+      title: Received at
+      description: ISO-8601 timestamp (optional).
+    snippet:
+      type: string
+      title: Snippet
+      description: Short excerpt from the email body (optional).
+    links:
+      type: array
+      title: Links
+      items:
+        type: object
+        additionalProperties: false
+        properties:
+          url: { type: string }
+          type: { type: string }
+          auth_required: { type: boolean }
+          vendor_hint: { type: string }
+        required: [url]
+    attachments:
+      type: array
+      title: Attachments
+      items:
+        type: object
+        additionalProperties: false
+        properties:
+          filename: { type: string }
+          mime_type: { type: string }
+          size_bytes: { type: integer }
+          quarantine_path:
+            type: string
+            description: Absolute path to the quarantined file (optional).
+        required: [filename]
+    inferred_company_name:
+      type: string
+      title: Company (inferred)
+    inferred_broker_name:
+      type: string
+      title: Broker (inferred)
+    inferred_urgency:
+      type: string
+      title: Urgency (inferred)
+      enum: [low, med, high]
+    quarantine_root:
+      type: string
+      title: Quarantine root
+      default: /home/zaks/DataRoom/00-PIPELINE/_INBOX_QUARANTINE
+    quarantine_dir:
+      type: string
+      title: Quarantine directory
+      description: If omitted, will be derived from quarantine_root/gmail_message_id.
+  required: [gmail_message_id, subject]
+
+output_artifacts:
+  - kind: json
+    extension: .json
+    mime_type: application/json
+    required: true
+    description: Action manifest (deal_id, deal_path, copied artifacts).
+  - kind: md
+    extension: .md
+    mime_type: text/markdown
+    required: false
+    description: Human-readable summary of what was created/copied.
+
+risk_level: medium
+required_approval: true
+deterministic_steps:
+  - Validate required fields (gmail_message_id, subject)
+  - Load Deal Registry and check email→deal mapping
+  - Create deal workspace folder under pipeline if needed
+  - Copy quarantined email artifacts + safe attachments into deal folder
+  - Persist registry updates (deal + email mapping) and write manifest
+llm_allowed: false
+
+examples:
+  - user_intent: Approve this inbound broker email and create a deal workspace.
+    expected: Create a new deal folder and registry record, then copy quarantine artifacts into 07-Correspondence.
+  - user_intent: Turn the quarantined email into a deal and stage it in Inbound.
+    expected: Create an Inbound deal folder and link the email to the new deal_id.
+
+constraints:
+  - Never auto-send emails or perform irreversible external actions.
+  - Must be idempotent (re-running should not create duplicate deals or duplicate copies).
+  - Do not delete quarantine artifacts; copy only.

@@ -1,0 +1,66 @@
+capability_id: deal.append_email_materials.v1
+title: Append email materials to existing deal
+description: >
+  Adds a new correspondence bundle to an existing deal workspace.
+  Used for follow-up emails in threads already linked to deals.
+  Does NOT create new deals.
+action_type: DEAL.APPEND_EMAIL_MATERIALS
+
+input_schema:
+  type: object
+  additionalProperties: true
+  properties:
+    deal_id:
+      type: string
+      description: Target deal ID (required).
+    message_id:
+      type: string
+      description: Gmail message id.
+    thread_id:
+      type: string
+      description: Gmail thread id.
+    quarantine_dir:
+      type: string
+      description: Path to quarantine directory with email content and downloaded attachments.
+    from:
+      type: string
+    to:
+      type: string
+    date:
+      type: string
+    subject:
+      type: string
+    links:
+      type: array
+    attachments:
+      type: array
+  required: [deal_id, message_id, subject]
+
+output_artifacts:
+  - kind: md
+    extension: .md
+    mime_type: text/markdown
+    required: true
+    description: Email markdown saved under deal/07-Correspondence/<bundle>/email.md
+  - kind: json
+    extension: .json
+    mime_type: application/json
+    required: true
+    description: Manifest saved under deal/07-Correspondence/<bundle>/manifest.json
+
+risk_level: low
+required_approval: false
+llm_allowed: false
+
+constraints:
+  - Never create new deals.
+  - Never send email.
+  - Append-only to existing deal folder (never overwrite bundles).
+  - "No silent drops: on failure, action must surface a clear error."
+
+tags:
+  - deal
+  - correspondence
+  - email
+  - ingestion
+

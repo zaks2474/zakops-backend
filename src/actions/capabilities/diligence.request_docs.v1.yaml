@@ -1,0 +1,45 @@
+capability_id: diligence.request_docs.v1
+title: Request diligence documents (checklist)
+description: >
+  Produce a draft-only diligence document request checklist artifact for a deal.
+  This capability NEVER sends email automatically.
+action_type: DILIGENCE.REQUEST_DOCS
+
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    doc_type:
+      type: string
+      title: Document type
+      description: e.g., financials, legal, contracts
+    description:
+      type: string
+      title: Description
+      description: What should be requested and why?
+  required: [doc_type, description]
+
+output_artifacts:
+  - kind: md
+    extension: .md
+    mime_type: text/markdown
+    required: true
+    description: Draft checklist request in markdown.
+
+risk_level: medium
+required_approval: true
+deterministic_steps:
+  - Validate inputs
+  - Generate checklist artifact deterministically (no cloud)
+  - Save under deal folder
+llm_allowed: false
+
+examples:
+  - user_intent: Request LTM financials and last 3 years statements.
+    expected: Create a markdown checklist for the operator to send.
+  - user_intent: Ask for customer contracts and lease agreements.
+    expected: Create a contracts/legal checklist artifact.
+
+constraints:
+  - Never send email automatically (draft-only).
+

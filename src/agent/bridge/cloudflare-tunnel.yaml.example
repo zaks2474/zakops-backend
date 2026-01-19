@@ -1,0 +1,33 @@
+# ZakOps Agent Bridge Cloudflare Tunnel Configuration
+#
+# This is a template configuration for cloudflared tunnel.
+# Copy to ~/.cloudflared/config.yml and update with your tunnel ID.
+#
+# Setup steps:
+# 1. Install cloudflared: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+# 2. Login: cloudflared tunnel login
+# 3. Create tunnel: cloudflared tunnel create zakops-bridge
+# 4. Copy this file: cp cloudflare-tunnel.yaml.example ~/.cloudflared/config.yml
+# 5. Update tunnel ID and hostname in config.yml
+# 6. Route DNS: cloudflared tunnel route dns zakops-bridge zakops-bridge.yourdomain.com
+# 7. Run: cloudflared tunnel run zakops-bridge
+
+tunnel: <YOUR-TUNNEL-UUID>
+credentials-file: /home/zaks/.cloudflared/<YOUR-TUNNEL-UUID>.json
+
+ingress:
+  # Route requests to the local Agent Bridge
+  - hostname: zakops-bridge.yourdomain.com
+    service: http://127.0.0.1:9100
+    originRequest:
+      noTLSVerify: false
+      connectTimeout: 30s
+      tcpKeepAlive: 30s
+      # Cloudflare Access integration for additional security
+      # access:
+      #   required: true
+      #   teamName: your-team
+      #   audTag: zakops-bridge-audit
+
+  # Catch-all (required by cloudflared)
+  - service: http_status:404

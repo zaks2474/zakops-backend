@@ -1,0 +1,53 @@
+capability_id: presentation.generate_pitch_deck.v1
+title: Generate pitch deck (PPTX)
+description: >
+  Generate a simple pitch deck / lender summary deck for a deal using a deterministic slide template
+  populated from known deal metadata. Produces a PPTX artifact (PDF best-effort).
+action_type: PRESENTATION.GENERATE_PITCH_DECK
+
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    deck_title:
+      type: string
+      title: Deck title
+      description: If omitted, inferred from deal name.
+    subtitle:
+      type: string
+      title: Subtitle
+    include_financials:
+      type: boolean
+      title: Include financials slide
+      default: true
+  required: []
+
+output_artifacts:
+  - kind: pptx
+    extension: .pptx
+    mime_type: application/vnd.openxmlformats-officedocument.presentationml.presentation
+    required: true
+    description: Pitch deck PowerPoint.
+  - kind: pdf
+    extension: .pdf
+    mime_type: application/pdf
+    required: false
+    description: Optional PDF export (best-effort).
+
+risk_level: medium
+required_approval: true
+deterministic_steps:
+  - Gather deal metadata (company name, stage, key fields)
+  - Generate PPTX deterministically (no cloud required)
+  - Save artifact under deal folder
+llm_allowed: false
+
+examples:
+  - user_intent: Generate a pitch deck for this deal.
+    expected: Create a PPTX deck with overview + key metrics.
+  - user_intent: Create a lender summary deck without financials.
+    expected: Create a PPTX deck excluding the financials slide.
+
+constraints:
+  - Do not include secrets or private notes in artifacts unless explicitly requested.
+

@@ -1,0 +1,363 @@
+{
+  "$defs": {
+    "ArtifactTypeSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "extension": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "File extension including dot, e.g. .docx",
+          "title": "Extension"
+        },
+        "kind": {
+          "description": "Logical artifact type, e.g. md, docx, pdf, xlsx, pptx",
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "mime_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mime Type"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ArtifactTypeSpec",
+      "type": "object"
+    },
+    "MissingCapabilitySpec": {
+      "additionalProperties": false,
+      "description": "Returned when the planner cannot satisfy the request with the current manifest.\nThis is intended to be copy/pastable into the manifest as a starting point.",
+      "properties": {
+        "action_type": {
+          "minLength": 1,
+          "title": "Action Type",
+          "type": "string"
+        },
+        "capability_id": {
+          "description": "Suggested stable id, versioned",
+          "minLength": 1,
+          "title": "Capability Id",
+          "type": "string"
+        },
+        "constraints": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Constraints",
+          "type": "array"
+        },
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "examples": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Examples",
+          "type": "array"
+        },
+        "input_schema": {
+          "additionalProperties": true,
+          "title": "Input Schema",
+          "type": "object"
+        },
+        "irreversible": {
+          "default": false,
+          "title": "Irreversible",
+          "type": "boolean"
+        },
+        "output_artifacts": {
+          "items": {
+            "$ref": "#/$defs/ArtifactTypeSpec"
+          },
+          "title": "Output Artifacts",
+          "type": "array"
+        },
+        "requires_approval": {
+          "default": true,
+          "title": "Requires Approval",
+          "type": "boolean"
+        },
+        "risk_level": {
+          "default": "medium",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Risk Level",
+          "type": "string"
+        },
+        "safety_class": {
+          "default": "reversible",
+          "enum": [
+            "reversible",
+            "gated",
+            "irreversible"
+          ],
+          "title": "Safety Class",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "tool_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Underlying tool id/name if applicable",
+          "title": "Tool Name"
+        }
+      },
+      "required": [
+        "capability_id",
+        "title",
+        "description",
+        "action_type"
+      ],
+      "title": "MissingCapabilitySpec",
+      "type": "object"
+    },
+    "PlanStep": {
+      "additionalProperties": false,
+      "properties": {
+        "action_type": {
+          "description": "Namespaced action type to execute",
+          "minLength": 1,
+          "title": "Action Type",
+          "type": "string"
+        },
+        "capability_id": {
+          "description": "Versioned capability id, e.g. document.generate_loi.v1",
+          "minLength": 1,
+          "title": "Capability Id",
+          "type": "string"
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "expected_artifacts": {
+          "items": {
+            "$ref": "#/$defs/ArtifactTypeSpec"
+          },
+          "title": "Expected Artifacts",
+          "type": "array"
+        },
+        "inputs": {
+          "additionalProperties": true,
+          "title": "Inputs",
+          "type": "object"
+        },
+        "safety": {
+          "$ref": "#/$defs/StepSafety"
+        },
+        "step_id": {
+          "description": "Stable within-plan identifier, e.g. step_1",
+          "minLength": 1,
+          "title": "Step Id",
+          "type": "string"
+        },
+        "summary": {
+          "default": "",
+          "description": "1-2 line summary",
+          "title": "Summary",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "tool_name": {
+          "description": "Tool/capability name for UI/debug (may equal action_type)",
+          "minLength": 1,
+          "title": "Tool Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "step_id",
+        "capability_id",
+        "action_type",
+        "tool_name",
+        "title"
+      ],
+      "title": "PlanStep",
+      "type": "object"
+    },
+    "StepSafety": {
+      "additionalProperties": false,
+      "properties": {
+        "gated": {
+          "default": false,
+          "title": "Gated",
+          "type": "boolean"
+        },
+        "irreversible": {
+          "default": false,
+          "title": "Irreversible",
+          "type": "boolean"
+        },
+        "requires_human_approval": {
+          "default": true,
+          "title": "Requires Human Approval",
+          "type": "boolean"
+        },
+        "safety_class": {
+          "default": "reversible",
+          "enum": [
+            "reversible",
+            "gated",
+            "irreversible"
+          ],
+          "title": "Safety Class",
+          "type": "string"
+        }
+      },
+      "title": "StepSafety",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Stable planner\u2192executor interface.\n\n- Planner produces PlanSpec only (no execution).\n- Executor consumes PlanSpec and performs gated/approved execution.",
+  "properties": {
+    "blocked_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Blocked Reason"
+    },
+    "created_at": {
+      "title": "Created At",
+      "type": "string"
+    },
+    "created_by": {
+      "default": "tool_rag_planner",
+      "title": "Created By",
+      "type": "string"
+    },
+    "deal_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Deal Id"
+    },
+    "debug": {
+      "additionalProperties": true,
+      "title": "Debug",
+      "type": "object"
+    },
+    "goal": {
+      "minLength": 1,
+      "title": "Goal",
+      "type": "string"
+    },
+    "missing_capability": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MissingCapabilitySpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "plan_id": {
+      "minLength": 1,
+      "title": "Plan Id",
+      "type": "string"
+    },
+    "safety_constraints": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Safety Constraints",
+      "type": "array"
+    },
+    "status": {
+      "default": "OK",
+      "enum": [
+        "OK",
+        "NEEDS_TOOL",
+        "BLOCKED"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/PlanStep"
+      },
+      "title": "Steps",
+      "type": "array"
+    }
+  },
+  "required": [
+    "plan_id",
+    "goal"
+  ],
+  "title": "PlanSpec",
+  "type": "object"
+}

@@ -1,0 +1,58 @@
+capability_id: deal.enrich_materials.v1
+title: Enrich deal materials (local)
+description: >
+  Local-only enrichment for a deal's materials/artifacts. Produces deterministic extraction outputs
+  (doc-type detection, numbers/metrics scan, and summaries) and writes them under the deal's
+  99-ACTIONS/<action_id>/ directory. This capability NEVER calls cloud providers and is reversible.
+action_type: DEAL.ENRICH_MATERIALS
+
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    artifact_paths:
+      type: array
+      description: List of absolute paths to artifacts to scan (md/txt/csv preferred for v1).
+      items:
+        type: string
+    bundle_path:
+      type: string
+      description: Optional correspondence bundle directory to extract links/manifests from.
+    max_read_bytes:
+      type: integer
+      description: Max bytes to read per text artifact (default 200000).
+    deal_path:
+      type: string
+      description: Optional deal folder path if ctx.deal is unavailable.
+  required: [artifact_paths]
+
+output_artifacts:
+  - kind: md
+    extension: .md
+    mime_type: text/markdown
+    required: true
+    description: Extraction summary.
+  - kind: json
+    extension: .json
+    mime_type: application/json
+    required: true
+    description: Extracted entities/metrics and detected doc types.
+
+risk_level: low
+required_approval: false
+deterministic_steps:
+  - Validate artifact paths
+  - Scan text for numbers and financial keywords
+  - Detect doc types from filenames
+  - Write summary + JSON outputs under deal action artifacts
+llm_allowed: false
+cloud_required: false
+
+constraints:
+  - Local-only. No cloud calls.
+  - No destructive operations.
+
+tags:
+  - deal
+  - enrichment
+  - local

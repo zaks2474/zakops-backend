@@ -1,0 +1,66 @@
+capability_id: document.generate_loi.v1
+title: Generate LOI document
+description: >
+  Generate a Letter of Intent (LOI) artifact for a deal, using deterministic templates and
+  available deal metadata. Optional fields improve quality but are not required.
+action_type: DOCUMENT.GENERATE_LOI
+
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    purchaser_name:
+      type: string
+      title: Purchaser name
+      default: ZakOps Acquisition LLC
+    target_company:
+      type: string
+      title: Target company
+      description: If omitted, will be inferred from deal registry canonical name.
+    purchase_price:
+      type: string
+      title: Purchase price
+      description: e.g., $5,000,000
+    exclusivity_days:
+      type: integer
+      title: Exclusivity days
+      default: 30
+    closing_timeline:
+      type: string
+      title: Closing timeline
+      default: 60 days from LOI
+    notes:
+      type: string
+      title: Notes
+  required: []
+
+output_artifacts:
+  - kind: docx
+    extension: .docx
+    mime_type: application/vnd.openxmlformats-officedocument.wordprocessingml.document
+    required: true
+    description: LOI DOCX generated from template.
+  - kind: pdf
+    extension: .pdf
+    mime_type: application/pdf
+    required: false
+    description: Optional PDF export (best-effort).
+
+risk_level: high
+required_approval: true
+deterministic_steps:
+  - Gather deal metadata (company name, asking, broker) when available
+  - Generate LOI template deterministically (no cloud required)
+  - Save artifacts under deal folder
+llm_allowed: false
+
+examples:
+  - user_intent: Draft an LOI for DEAL-2025-001.
+    expected: Create a DOCX LOI artifact under the deal folder, with placeholders for missing terms.
+  - user_intent: Generate a simple LOI with 30-day exclusivity.
+    expected: Create LOI DOCX including exclusivity language.
+
+constraints:
+  - Never execute irreversible deal stage transitions automatically.
+  - LOI generation is artifact-only; operator must review before sharing externally.
+

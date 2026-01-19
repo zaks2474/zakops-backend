@@ -1,0 +1,872 @@
+#!/usr/bin/env python3
+"""
+ZakOps Agent Bridge - MCP Server for LangSmith Integration
+
+This FastAPI server exposes local ZakOps infrastructure to the LangSmith Agent Builder,
+enabling cloud-based AI orchestration while keeping all state and execution local.
+
+Architecture:
+- LangSmith Agent Builder (cloud) -> Cloudflare Tunnel -> This Bridge (local)
+- Bridge proxies to: Deal Lifecycle API (:8090), RAG API (:8052), DataRoom filesystem
+
+Security:
+- Bearer token authentication on all endpoints except /health
+- Path traversal protection on all file operations
+- Atomic writes with persistence verification
+- No delete operations, draft-only emails
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import shutil
+import tempfile
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Header, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+BRIDGE_PORT = int(os.getenv("ZAKOPS_BRIDGE_PORT", "9100"))
+BRIDGE_HOST = os.getenv("ZAKOPS_BRIDGE_HOST", "127.0.0.1")
+API_KEY = os.getenv("ZAKOPS_BRIDGE_API_KEY", "")
+
+# Backend services
+DEAL_API_URL = os.getenv("ZAKOPS_DEAL_API_URL", "http://localhost:8090")
+RAG_API_URL = os.getenv("ZAKOPS_RAG_API_URL", "http://localhost:8052")
+
+# Filesystem paths
+DATAROOM_ROOT = Path(os.getenv("DATAROOM_ROOT", "/home/zaks/DataRoom"))
+PIPELINE_PATH = DATAROOM_ROOT / "00-PIPELINE" / "Inbound"
+QUARANTINE_PATH = DATAROOM_ROOT / "00-PIPELINE" / "_INBOX_QUARANTINE"
+REGISTRY_PATH = DATAROOM_ROOT / ".deal-registry"
+LOG_PATH = REGISTRY_PATH / "logs" / "agent_bridge.jsonl"
+
+# Ensure log directory exists
+LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# =============================================================================
+# Logging Setup
+# =============================================================================
+
+class JSONLogHandler(logging.Handler):
+    """Log handler that writes structured JSON to a file."""
+
+    def __init__(self, filepath: Path):
+        super().__init__()
+        self.filepath = filepath
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            log_entry = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "level": record.levelname,
+                "message": record.getMessage(),
+                "logger": record.name,
+            }
+            if hasattr(record, "correlation_id"):
+                log_entry["correlation_id"] = record.correlation_id
+            if hasattr(record, "extra_data"):
+                log_entry["data"] = record.extra_data
+
+            with open(self.filepath, "a", encoding="utf-8") as f:
+                f.write(json.dumps(log_entry) + "\n")
+        except Exception:
+            pass  # Don't fail on logging errors
+
+
+# Setup logging
+logger = logging.getLogger("agent_bridge")
+logger.setLevel(logging.INFO)
+logger.addHandler(JSONLogHandler(LOG_PATH))
+
+# Also log to console
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s"))
+logger.addHandler(console_handler)
+
+
+def log_request(correlation_id: str, endpoint: str, method: str, data: Optional[Dict] = None):
+    """Log an incoming request."""
+    record = logging.LogRecord(
+        name="agent_bridge",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg=f"{method} {endpoint}",
+        args=(),
+        exc_info=None,
+    )
+    record.correlation_id = correlation_id
+    record.extra_data = data or {}
+    logger.handle(record)
+
+
+def log_error(correlation_id: str, error: str, details: Optional[Dict] = None):
+    """Log an error."""
+    record = logging.LogRecord(
+        name="agent_bridge",
+        level=logging.ERROR,
+        pathname="",
+        lineno=0,
+        msg=error,
+        args=(),
+        exc_info=None,
+    )
+    record.correlation_id = correlation_id
+    record.extra_data = details or {}
+    logger.handle(record)
+
+
+# =============================================================================
+# FastAPI Application
+# =============================================================================
+
+app = FastAPI(
+    title="ZakOps Agent Bridge",
+    description="MCP Server connecting LangSmith Agent Builder to local ZakOps infrastructure",
+    version="1.0.0",
+)
+
+
+# =============================================================================
+# Authentication
+# =============================================================================
+
+async def verify_api_key(authorization: Optional[str] = Header(None)) -> str:
+    """Verify the Bearer token and return a correlation ID."""
+    correlation_id = str(uuid.uuid4())[:8]
+
+    if not API_KEY:
+        # No API key configured - allow access (development mode)
+        logger.warning("No API key configured - running in development mode")
+        return correlation_id
+
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid Authorization header format")
+
+    token = authorization[7:]
+    if token != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    return correlation_id
+
+
+# =============================================================================
+# Path Safety Utilities
+# =============================================================================
+
+def validate_path_safe(base_path: Path, relative_path: str) -> Path:
+    """
+    Validate that a relative path is safe (no traversal) and returns the resolved path.
+
+    Raises HTTPException if path is unsafe.
+    """
+    # Block obvious traversal patterns
+    if ".." in relative_path:
+        raise HTTPException(status_code=400, detail="Path traversal blocked: '..' not allowed")
+
+    if relative_path.startswith("/"):
+        raise HTTPException(status_code=400, detail="Absolute paths not allowed")
+
+    # Resolve and verify containment
+    resolved = (base_path / relative_path).resolve()
+
+    try:
+        resolved.relative_to(base_path.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Path traversal blocked: path escapes base directory")
+
+    return resolved
+
+
+def get_deal_folder(deal_id: str) -> Path:
+    """Get the folder path for a deal, validating it exists.
+
+    Folder names follow the pattern: {CanonicalName}--{YearNumber}
+    e.g., 'Textile-Art-Education-Business--2026-003' for deal_id 'DEAL-2026-003'
+    """
+    # Extract the numeric suffix from deal_id (e.g., "2026-003" from "DEAL-2026-003")
+    suffix = deal_id.replace("DEAL-", "")
+
+    for folder in PIPELINE_PATH.iterdir():
+        if folder.is_dir() and folder.name.endswith(f"--{suffix}"):
+            return folder
+
+    raise HTTPException(status_code=404, detail=f"Deal folder not found for {deal_id}")
+
+
+# =============================================================================
+# Atomic Write Utilities
+# =============================================================================
+
+def atomic_json_write(filepath: Path, data: Dict[str, Any], verify_field: str = "updated_at") -> bool:
+    """
+    Atomically write JSON to a file with verification.
+
+    1. Write to temp file
+    2. Rename (atomic on POSIX)
+    3. Verify by re-reading
+
+    Returns True if successful and verified.
+    """
+    # Ensure parent directory exists
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    # Add timestamp if not present
+    if verify_field not in data:
+        data[verify_field] = datetime.now(timezone.utc).isoformat()
+
+    # Write to temp file
+    temp_path = filepath.parent / f".{filepath.name}.{uuid.uuid4().hex[:8]}.tmp"
+
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+
+        # Atomic rename
+        temp_path.rename(filepath)
+
+        # Verify
+        with open(filepath, "r", encoding="utf-8") as f:
+            verified = json.load(f)
+
+        if verified.get(verify_field) != data.get(verify_field):
+            raise RuntimeError("Verification failed: written data does not match")
+
+        return True
+
+    except Exception as e:
+        # Cleanup temp file if it exists
+        if temp_path.exists():
+            temp_path.unlink()
+        raise e
+
+
+# =============================================================================
+# Pydantic Models
+# =============================================================================
+
+class CreateActionRequest(BaseModel):
+    action_type: str = Field(..., description="Action type (e.g., DEAL.UPDATE_STAGE)")
+    title: str = Field(..., description="Human-readable action title")
+    inputs: Dict[str, Any] = Field(default_factory=dict, description="Action inputs")
+    deal_id: Optional[str] = Field(None, description="Associated deal ID")
+    requires_approval: bool = Field(True, description="Whether action requires human approval")
+    source: str = Field("langsmith_bridge", description="Source of the action")
+
+
+class UpdateDealProfileRequest(BaseModel):
+    deal_id: str = Field(..., description="Deal ID to update")
+    profile_patch: Dict[str, Any] = Field(..., description="Fields to update in deal_profile.json")
+
+
+class WriteArtifactRequest(BaseModel):
+    deal_id: str = Field(..., description="Deal ID")
+    relative_path: str = Field(..., description="Path relative to deal folder")
+    content: str = Field(..., description="File content (text)")
+    content_type: str = Field("text/plain", description="Content MIME type")
+
+
+class RAGQueryRequest(BaseModel):
+    query: str = Field(..., description="Search query")
+    deal_id: Optional[str] = Field(None, description="Filter to specific deal")
+    top_k: int = Field(5, ge=1, le=50, description="Number of results")
+
+
+class ReindexDealRequest(BaseModel):
+    deal_id: str = Field(..., description="Deal ID to reindex")
+
+
+# =============================================================================
+# Health & Discovery Endpoints
+# =============================================================================
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint (no authentication required)."""
+    checks = {
+        "bridge": "healthy",
+        "deal_api": "unknown",
+        "rag_api": "unknown",
+        "dataroom": "unknown",
+    }
+
+    # Check Deal API
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{DEAL_API_URL}/api/deals")
+            checks["deal_api"] = "healthy" if resp.status_code == 200 else "degraded"
+    except Exception:
+        checks["deal_api"] = "unhealthy"
+
+    # Check RAG API
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{RAG_API_URL}/rag/stats")
+            checks["rag_api"] = "healthy" if resp.status_code == 200 else "degraded"
+    except Exception:
+        checks["rag_api"] = "unhealthy"
+
+    # Check DataRoom
+    checks["dataroom"] = "healthy" if DATAROOM_ROOT.exists() else "unhealthy"
+
+    overall = "healthy" if all(v == "healthy" for v in checks.values()) else "degraded"
+
+    return {
+        "status": overall,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "checks": checks,
+    }
+
+
+@app.get("/tools")
+async def list_tools(correlation_id: str = Depends(verify_api_key)):
+    """List all available tools."""
+    log_request(correlation_id, "/tools", "GET")
+
+    return {
+        "tools": [
+            {
+                "name": "zakops.list_deals",
+                "endpoint": "/tools/zakops/list_deals",
+                "method": "GET",
+                "description": "List all deals with metadata",
+            },
+            {
+                "name": "zakops.get_deal",
+                "endpoint": "/tools/zakops/get_deal/{deal_id}",
+                "method": "GET",
+                "description": "Get full deal state with enrichments",
+            },
+            {
+                "name": "zakops.create_action",
+                "endpoint": "/tools/zakops/create_action",
+                "method": "POST",
+                "description": "Create an action (proposal) in the local system",
+            },
+            {
+                "name": "zakops.get_action",
+                "endpoint": "/tools/zakops/get_action/{action_id}",
+                "method": "GET",
+                "description": "Get action status and outputs",
+            },
+            {
+                "name": "zakops.list_actions",
+                "endpoint": "/tools/zakops/list_actions",
+                "method": "GET",
+                "description": "List actions with filters",
+            },
+            {
+                "name": "zakops.update_deal_profile",
+                "endpoint": "/tools/zakops/update_deal_profile",
+                "method": "POST",
+                "description": "Atomically update deal_profile.json",
+            },
+            {
+                "name": "zakops.write_deal_artifact",
+                "endpoint": "/tools/zakops/write_deal_artifact",
+                "method": "POST",
+                "description": "Write artifact to deal folder (path-safe)",
+            },
+            {
+                "name": "zakops.list_deal_artifacts",
+                "endpoint": "/tools/zakops/list_deal_artifacts/{deal_id}",
+                "method": "GET",
+                "description": "List files in deal folder",
+            },
+            {
+                "name": "zakops.list_quarantine",
+                "endpoint": "/tools/zakops/list_quarantine",
+                "method": "GET",
+                "description": "List pending quarantine items",
+            },
+            {
+                "name": "zakops.approve_quarantine",
+                "endpoint": "/tools/zakops/approve_quarantine/{action_id}",
+                "method": "POST",
+                "description": "Approve a quarantine item",
+            },
+            {
+                "name": "rag.query_local",
+                "endpoint": "/tools/rag/query_local",
+                "method": "POST",
+                "description": "Query local RAG database",
+            },
+            {
+                "name": "rag.reindex_deal",
+                "endpoint": "/tools/rag/reindex_deal",
+                "method": "POST",
+                "description": "Trigger deal reindex in RAG",
+            },
+        ]
+    }
+
+
+# =============================================================================
+# ZakOps Deal Endpoints
+# =============================================================================
+
+@app.get("/tools/zakops/list_deals")
+async def list_deals(
+    correlation_id: str = Depends(verify_api_key),
+    status: Optional[str] = None,
+    stage: Optional[str] = None,
+):
+    """List all deals with optional filters."""
+    log_request(correlation_id, "/tools/zakops/list_deals", "GET", {"status": status, "stage": stage})
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(f"{DEAL_API_URL}/api/deals")
+            resp.raise_for_status()
+            data = resp.json()
+
+        deals = data.get("deals", [])
+
+        # Apply filters
+        if status:
+            deals = [d for d in deals if d.get("status") == status]
+        if stage:
+            deals = [d for d in deals if d.get("stage") == stage]
+
+        return {
+            "count": len(deals),
+            "deals": deals,
+        }
+
+    except httpx.HTTPError as e:
+        log_error(correlation_id, f"Failed to list deals: {e}")
+        raise HTTPException(status_code=502, detail=f"Deal API error: {str(e)}")
+
+
+@app.get("/tools/zakops/get_deal/{deal_id}")
+async def get_deal(deal_id: str, correlation_id: str = Depends(verify_api_key)):
+    """Get full deal state with enrichments."""
+    log_request(correlation_id, f"/tools/zakops/get_deal/{deal_id}", "GET")
+
+    try:
+        # Get deal from API
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(f"{DEAL_API_URL}/api/deals/{deal_id}")
+            resp.raise_for_status()
+            deal = resp.json()
+
+        # Get deal folder
+        try:
+            deal_folder = get_deal_folder(deal_id)
+        except HTTPException:
+            # Deal exists in registry but folder not found
+            deal["_folder_exists"] = False
+            return deal
+
+        deal["_folder_exists"] = True
+        deal["_folder_path"] = str(deal_folder)
+
+        # Load deal_profile.json if exists
+        profile_path = deal_folder / "deal_profile.json"
+        if profile_path.exists():
+            try:
+                with open(profile_path, "r", encoding="utf-8") as f:
+                    deal["deal_profile"] = json.load(f)
+            except Exception as e:
+                deal["deal_profile"] = {"_error": str(e)}
+
+        # Load classified_links.json if exists
+        classified_path = deal_folder / "07-Correspondence" / "classified_links.json"
+        if classified_path.exists():
+            try:
+                with open(classified_path, "r", encoding="utf-8") as f:
+                    deal["classified_links"] = json.load(f)
+            except Exception as e:
+                deal["classified_links"] = {"_error": str(e)}
+
+        # Load triage_summary.json from first bundle if exists
+        corr_dir = deal_folder / "07-Correspondence"
+        if corr_dir.exists():
+            for bundle_dir in sorted(corr_dir.iterdir()):
+                if bundle_dir.is_dir():
+                    manifest_path = bundle_dir / "manifest.json"
+                    if manifest_path.exists():
+                        try:
+                            with open(manifest_path, "r", encoding="utf-8") as f:
+                                manifest = json.load(f)
+                            quarantine_dir = manifest.get("quarantine_dir")
+                            if quarantine_dir:
+                                triage_path = Path(quarantine_dir) / "triage_summary.json"
+                                if triage_path.exists():
+                                    with open(triage_path, "r", encoding="utf-8") as f:
+                                        deal["triage_summary_source"] = json.load(f)
+                                    break
+                        except Exception:
+                            pass
+
+        return deal
+
+    except httpx.HTTPError as e:
+        log_error(correlation_id, f"Failed to get deal {deal_id}: {e}")
+        raise HTTPException(status_code=502, detail=f"Deal API error: {str(e)}")
+
+
+@app.get("/tools/zakops/list_deal_artifacts/{deal_id}")
+async def list_deal_artifacts(deal_id: str, correlation_id: str = Depends(verify_api_key)):
+    """List files in deal folder."""
+    log_request(correlation_id, f"/tools/zakops/list_deal_artifacts/{deal_id}", "GET")
+
+    deal_folder = get_deal_folder(deal_id)
+
+    artifacts = []
+
+    def scan_dir(path: Path, prefix: str = ""):
+        for item in sorted(path.iterdir()):
+            rel_path = f"{prefix}/{item.name}" if prefix else item.name
+            if item.is_file():
+                artifacts.append({
+                    "path": rel_path,
+                    "size_bytes": item.stat().st_size,
+                    "modified_at": datetime.fromtimestamp(
+                        item.stat().st_mtime, tz=timezone.utc
+                    ).isoformat(),
+                })
+            elif item.is_dir() and not item.name.startswith("."):
+                scan_dir(item, rel_path)
+
+    scan_dir(deal_folder)
+
+    return {
+        "deal_id": deal_id,
+        "folder_path": str(deal_folder),
+        "artifact_count": len(artifacts),
+        "artifacts": artifacts,
+    }
+
+
+# =============================================================================
+# ZakOps Action Endpoints
+# =============================================================================
+
+@app.post("/tools/zakops/create_action")
+async def create_action(request: CreateActionRequest, correlation_id: str = Depends(verify_api_key)):
+    """Create an action (proposal) in the local system."""
+    log_request(correlation_id, "/tools/zakops/create_action", "POST", request.model_dump())
+
+    try:
+        payload = {
+            "action_type": request.action_type,
+            "title": request.title,
+            "inputs": request.inputs,
+            "deal_id": request.deal_id,
+            "source": request.source,
+            "created_by": "langsmith_agent",
+            "requires_human_review": request.requires_approval,
+        }
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(f"{DEAL_API_URL}/api/actions", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+        return {
+            "success": True,
+            "action_id": data.get("action", {}).get("action_id"),
+            "status": data.get("action", {}).get("status"),
+            "requires_approval": request.requires_approval,
+            "message": "Action created successfully",
+        }
+
+    except httpx.HTTPError as e:
+        log_error(correlation_id, f"Failed to create action: {e}")
+        raise HTTPException(status_code=502, detail=f"Deal API error: {str(e)}")
+
+
+@app.get("/tools/zakops/get_action/{action_id}")
+async def get_action(action_id: str, correlation_id: str = Depends(verify_api_key)):
+    """Get action status and outputs."""
+    log_request(correlation_id, f"/tools/zakops/get_action/{action_id}", "GET")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(f"{DEAL_API_URL}/api/actions/{action_id}")
+            resp.raise_for_status()
+            return resp.json()
+
+    except httpx.HTTPError as e:
+        log_error(correlation_id, f"Failed to get action {action_id}: {e}")
+        raise HTTPException(status_code=502, detail=f"Deal API error: {str(e)}")
+
+
+@app.get("/tools/zakops/list_actions")
+async def list_actions(
+    correlation_id: str = Depends(verify_api_key),
+    deal_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+):
+    """List actions with filters."""
+    log_request(correlation_id, "/tools/zakops/list_actions", "GET", {
+        "deal_id": deal_id, "status": status, "limit": limit
+    })
+
+    try:
+        params = {"limit": limit}
+        if deal_id:
+            params["deal_id"] = deal_id
+        if status:
+            params["status"] = status
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(f"{DEAL_API_URL}/api/actions", params=params)
+            resp.raise_for_status()
+            return resp.json()
+
+    except httpx.HTTPError as e:
+        log_error(correlation_id, f"Failed to list actions: {e}")
+        raise HTTPException(status_code=502, detail=f"Deal API error: {str(e)}")
+
+
+# =============================================================================
+# ZakOps Deal Profile Endpoints
+# =============================================================================
+
+@app.post("/tools/zakops/update_deal_profile")
+async def update_deal_profile(request: UpdateDealProfileRequest, correlation_id: str = Depends(verify_api_key)):
+    """Atomically update deal_profile.json with verification."""
+    log_request(correlation_id, "/tools/zakops/update_deal_profile", "POST", {
+        "deal_id": request.deal_id, "patch_keys": list(request.profile_patch.keys())
+    })
+
+    deal_folder = get_deal_folder(request.deal_id)
+    profile_path = deal_folder / "deal_profile.json"
+
+    # Load existing profile or create new
+    if profile_path.exists():
+        try:
+            with open(profile_path, "r", encoding="utf-8") as f:
+                profile = json.load(f)
+        except Exception:
+            profile = {}
+    else:
+        profile = {"deal_id": request.deal_id, "created_at": datetime.now(timezone.utc).isoformat()}
+
+    # Apply patch
+    profile.update(request.profile_patch)
+    profile["updated_at"] = datetime.now(timezone.utc).isoformat()
+    profile["updated_by"] = "langsmith_bridge"
+
+    # Atomic write with verification
+    try:
+        verified = atomic_json_write(profile_path, profile, verify_field="updated_at")
+
+        return {
+            "success": True,
+            "verified": verified,
+            "deal_id": request.deal_id,
+            "updated_fields": list(request.profile_patch.keys()),
+        }
+
+    except Exception as e:
+        log_error(correlation_id, f"Failed to update deal profile: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to persist deal profile: {str(e)}")
+
+
+@app.post("/tools/zakops/write_deal_artifact")
+async def write_deal_artifact(request: WriteArtifactRequest, correlation_id: str = Depends(verify_api_key)):
+    """Write an artifact to deal folder with path safety."""
+    log_request(correlation_id, "/tools/zakops/write_deal_artifact", "POST", {
+        "deal_id": request.deal_id, "relative_path": request.relative_path
+    })
+
+    deal_folder = get_deal_folder(request.deal_id)
+
+    # Validate path safety
+    target_path = validate_path_safe(deal_folder, request.relative_path)
+
+    # Ensure parent directory exists
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write file atomically
+    temp_path = target_path.parent / f".{target_path.name}.{uuid.uuid4().hex[:8]}.tmp"
+
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            f.write(request.content)
+
+        temp_path.rename(target_path)
+
+        # Verify
+        with open(target_path, "r", encoding="utf-8") as f:
+            written = f.read()
+
+        if written != request.content:
+            raise RuntimeError("Verification failed: written content does not match")
+
+        return {
+            "success": True,
+            "verified": True,
+            "deal_id": request.deal_id,
+            "path": request.relative_path,
+            "size_bytes": len(request.content),
+        }
+
+    except Exception as e:
+        if temp_path.exists():
+            temp_path.unlink()
+        log_error(correlation_id, f"Failed to write artifact: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to write artifact: {str(e)}")
+
+
+# =============================================================================
+# ZakOps Quarantine Endpoints
+# =============================================================================
+
+@app.get("/tools/zakops/list_quarantine")
+async def list_quarantine(
+    correlation_id: str = Depends(verify_api_key),
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List pending quarantine items."""
+    log_request(correlation_id, "/tools/zakops/list_quarantine", "GET", {"limit": limit, "offset": offset})
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"{DEAL_API_URL}/api/actions/quarantine",
+                params={"limit": limit, "offset": offset},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    except httpx.HTTPError as e:
+        log_error(correlation_id, f"Failed to list quarantine: {e}")
+        raise HTTPException(status_code=502, detail=f"Deal API error: {str(e)}")
+
+
+@app.post("/tools/zakops/approve_quarantine/{action_id}")
+async def approve_quarantine(action_id: str, correlation_id: str = Depends(verify_api_key)):
+    """Approve a quarantine item."""
+    log_request(correlation_id, f"/tools/zakops/approve_quarantine/{action_id}", "POST")
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(f"{DEAL_API_URL}/api/actions/quarantine/{action_id}/approve")
+            resp.raise_for_status()
+            return resp.json()
+
+    except httpx.HTTPError as e:
+        log_error(correlation_id, f"Failed to approve quarantine {action_id}: {e}")
+        raise HTTPException(status_code=502, detail=f"Deal API error: {str(e)}")
+
+
+# =============================================================================
+# RAG Endpoints
+# =============================================================================
+
+@app.post("/tools/rag/query_local")
+async def query_local_rag(request: RAGQueryRequest, correlation_id: str = Depends(verify_api_key)):
+    """Query local RAG database."""
+    log_request(correlation_id, "/tools/rag/query_local", "POST", {
+        "query": request.query[:50], "deal_id": request.deal_id, "top_k": request.top_k
+    })
+
+    try:
+        payload = {
+            "query": request.query,
+            "top_k": request.top_k,
+        }
+
+        # Filter by deal if specified
+        if request.deal_id:
+            payload["filter"] = {"deal_id": request.deal_id}
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(f"{RAG_API_URL}/rag/query", json=payload)
+            resp.raise_for_status()
+            return resp.json()
+
+    except httpx.HTTPError as e:
+        log_error(correlation_id, f"Failed to query RAG: {e}")
+        raise HTTPException(status_code=502, detail=f"RAG API error: {str(e)}")
+
+
+@app.post("/tools/rag/reindex_deal")
+async def reindex_deal(request: ReindexDealRequest, correlation_id: str = Depends(verify_api_key)):
+    """Trigger deal reindex in RAG."""
+    log_request(correlation_id, "/tools/rag/reindex_deal", "POST", {"deal_id": request.deal_id})
+
+    try:
+        # Get deal folder
+        deal_folder = get_deal_folder(request.deal_id)
+
+        # Call RAG index endpoint
+        payload = {
+            "paths": [str(deal_folder)],
+            "force": True,
+        }
+
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(f"{RAG_API_URL}/rag/index", json=payload)
+            resp.raise_for_status()
+            return resp.json()
+
+    except httpx.HTTPError as e:
+        log_error(correlation_id, f"Failed to reindex deal {request.deal_id}: {e}")
+        raise HTTPException(status_code=502, detail=f"RAG API error: {str(e)}")
+
+
+# =============================================================================
+# Error Handling
+# =============================================================================
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle HTTP exceptions with structured response."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": True,
+            "code": f"HTTP_{exc.status_code}",
+            "message": exc.detail,
+            "details": {},
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Handle unexpected exceptions."""
+    logger.error(f"Unexpected error: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": True,
+            "code": "INTERNAL_ERROR",
+            "message": "An unexpected error occurred",
+            "details": {"type": type(exc).__name__},
+        },
+    )
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+if __name__ == "__main__":
+    import uvicorn
+
+    logger.info(f"Starting ZakOps Agent Bridge on {BRIDGE_HOST}:{BRIDGE_PORT}")
+    uvicorn.run(app, host=BRIDGE_HOST, port=BRIDGE_PORT)
