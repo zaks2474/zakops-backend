@@ -83,6 +83,46 @@ async def readiness_check(response: Response) -> Dict[str, Any]:
     }
 
 
+@router.get("/health/startup")
+async def startup_check() -> Dict[str, Any]:
+    """
+    Kubernetes startup probe.
+
+    Returns 200 if the service has completed initialization.
+    Used by k8s to determine when the container is ready to receive probes.
+    """
+    # Check if database pool is initialized
+    try:
+        from ....core.database.adapter import get_database
+        db = await get_database()
+        await db.fetchrow("SELECT 1")
+        return {
+            "status": "started",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "starting",
+            "message": str(e)[:100],
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+
+@router.get("/api/version")
+async def get_version() -> Dict[str, Any]:
+    """
+    Get build version information.
+
+    Returns version, git commit, and build time for deployment verification.
+    """
+    return {
+        "version": os.getenv("APP_VERSION", "dev"),
+        "commit": os.getenv("GIT_COMMIT", "unknown"),
+        "build_time": os.getenv("BUILD_TIME", "unknown"),
+        "environment": os.getenv("APP_ENV", "development")
+    }
+
+
 @router.get("/health/detailed")
 async def detailed_health_check() -> Dict[str, Any]:
     """
@@ -97,7 +137,7 @@ async def detailed_health_check() -> Dict[str, Any]:
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "version": os.getenv("APP_VERSION", "1.0.0"),
-        "environment": os.getenv("ENVIRONMENT", "development"),
+        "environment": os.getenv("APP_ENV", "development"),
         "python_version": sys.version,
         "platform": platform.platform(),
         "config": {

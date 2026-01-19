@@ -1,0 +1,97 @@
+# ZakOps Production Docker Compose
+# Phase 14: Deployment
+#
+# Usage:
+#   export DATABASE_URL=postgresql://user:pass@host:5432/zakops
+#   export SESSION_SECRET=your-secret
+#   docker-compose -f docker-compose.production.yml up -d
+
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+      args:
+        - APP_VERSION=${VERSION:-latest}
+        - GIT_COMMIT=${GIT_COMMIT:-unknown}
+        - BUILD_TIME=${BUILD_TIME:-unknown}
+    image: zakops-backend:${VERSION:-latest}
+    container_name: zakops-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - AUTH_REQUIRED=true
+      - SESSION_SECRET=${SESSION_SECRET}
+      - CORS_ORIGINS=${CORS_ORIGINS:-["https://app.zakops.com"]}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
+      - OUTBOX_ENABLED=true
+      - SSE_MAX_CONNECTIONS=1000
+      - SSE_HEARTBEAT_INTERVAL=30
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - zakops-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # Outbox processor runs the same image with a different command
+  outbox-processor:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    image: zakops-backend:${VERSION:-latest}
+    container_name: zakops-outbox
+    restart: unless-stopped
+    command: ["python", "-m", "src.core.outbox.runner"]
+    environment:
+      - APP_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - OUTBOX_MAX_ATTEMPTS=5
+      - OUTBOX_POLL_INTERVAL=1.0
+    depends_on:
+      backend:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - zakops-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+
+networks:
+  zakops-network:
+    driver: bridge
+
+# Volume for local development/testing with postgres
+# In production, use managed database (RDS, Cloud SQL, etc.)
+volumes:
+  postgres_data:
