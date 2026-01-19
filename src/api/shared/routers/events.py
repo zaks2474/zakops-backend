@@ -1,8 +1,10 @@
 """
 Event API Endpoints
 
-Provides REST endpoints for querying events.
+Provides REST endpoints for querying events and SSE streaming.
 These endpoints are consumed by the UI for the Agent Visibility Layer.
+
+Phase 13: Production hardening with SSE streaming support.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -10,9 +12,14 @@ from typing import List, Optional
 from uuid import UUID
 import json
 import logging
+import os
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, Request, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+
+from ..sse import create_sse_response, get_sse_manager
+from ..middleware.auth import get_current_operator, is_auth_required
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +162,105 @@ async def get_event_stats(
     stats = await service.get_stats(since=since)
 
     return EventStatsResponse(**stats)
+
+
+@router.get("/stream")
+async def event_stream(
+    request: Request,
+    correlation_id: Optional[str] = Query(None, description="Filter by deal_id"),
+):
+    """
+    Server-Sent Events stream.
+
+    Features:
+    - Heartbeat every 30 seconds
+    - Supports Last-Event-ID for replay
+    - Can filter by correlation_id (deal_id)
+    - Rate limited per user
+
+    Headers:
+    - Accept: text/event-stream
+    - Last-Event-ID: (optional) Resume from this event
+    """
+    # Enforce auth in production
+    if is_auth_required():
+        operator = get_current_operator(request)
+        if operator is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        user_id = str(operator.id)
+    else:
+        user_id = None
+
+    return await create_sse_response(
+        request=request,
+        user_id=user_id,
+        correlation_id=correlation_id
+    )
+
+
+@router.get("/stream/status")
+async def stream_status():
+    """Get SSE connection statistics."""
+    manager = get_sse_manager()
+
+    return {
+        "total_connections": manager.connection_count,
+        "max_connections": manager.config.max_total_connections,
+        "heartbeat_interval_seconds": manager.config.heartbeat_interval,
+        "replay_window_hours": manager.config.event_replay_window.total_seconds() / 3600
+    }
+
+
+@router.get("/poll")
+async def poll_events(
+    request: Request,
+    correlation_id: Optional[str] = Query(None),
+    since: Optional[str] = Query(None, description="Event ID to fetch after"),
+    limit: int = Query(50, ge=1, le=100),
+):
+    """
+    Polling fallback for SSE.
+
+    Use this endpoint if SSE is unavailable.
+    """
+    # Enforce auth in production
+    if is_auth_required():
+        operator = get_current_operator(request)
+        if operator is None:
+            raise HTTPException(status_code=401, detail="Authentication required")
+
+    from ....core.database.adapter import get_database
+
+    db = await get_database()
+
+    # Query recent events
+    if correlation_id:
+        events = await db.fetch(
+            """
+            SELECT id, correlation_id, event_type, event_data, created_at
+            FROM zakops.agent_events
+            WHERE correlation_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            correlation_id, limit
+        )
+    else:
+        events = await db.fetch(
+            """
+            SELECT id, correlation_id, event_type, event_data, created_at
+            FROM zakops.agent_events
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            limit
+        )
+
+    return {
+        "events": [dict(e) for e in events],
+        "polling_interval_ms": 5000,
+        "degraded_mode": True
+    }
 
 
 @router.get("/{event_id}", response_model=EventResponse)

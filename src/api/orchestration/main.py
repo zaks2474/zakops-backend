@@ -29,6 +29,9 @@ from ..shared.routers.health import router as health_router
 from ..shared.openapi import setup_openapi
 # Phase 10: Agent Integration
 from .routers.invoke import router as agent_router
+# Phase 13: Production Hardening
+from .routers.admin import router as admin_router
+from ..shared.security import SecurityMiddleware
 
 # Configuration
 DB_URL = os.environ.get(
@@ -257,6 +260,12 @@ app.include_router(health_router)
 
 # Phase 10: Agent Integration
 app.include_router(agent_router)
+
+# Phase 13: Admin/operator endpoints
+app.include_router(admin_router)
+
+# Phase 13: Security middleware
+app.add_middleware(SecurityMiddleware)
 
 # Setup custom OpenAPI schema
 setup_openapi(app)

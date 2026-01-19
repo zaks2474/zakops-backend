@@ -19,6 +19,7 @@ from .writer import OutboxWriter, get_outbox_writer
 from .processor import OutboxProcessor, start_outbox_processor, stop_outbox_processor
 from .models import OutboxEntry, OutboxStatus
 from .transactional import TransactionalPublisher, transactional_publish
+from .dlq import DLQManager, DLQEntry, DLQAction, get_dlq_manager
 
 __all__ = [
     "OutboxWriter",
@@ -30,4 +31,8 @@ __all__ = [
     "OutboxStatus",
     "TransactionalPublisher",
     "transactional_publish",
+    "DLQManager",
+    "DLQEntry",
+    "DLQAction",
+    "get_dlq_manager",
 ]
