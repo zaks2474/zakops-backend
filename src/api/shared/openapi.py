@@ -1,9 +1,8 @@
 """
-OpenAPI Schema Enhancements
+OpenAPI Schema Configuration
 
-Phase 5: API Stabilization
-
-Customizes the OpenAPI schema for better documentation.
+Phase 8: OpenAPI & Tooling (Enhanced from Phase 5)
+Provides comprehensive API documentation for ZakOps Backend.
 """
 
 from typing import Dict, Any
@@ -13,7 +12,7 @@ from fastapi import FastAPI
 
 def customize_openapi(app: FastAPI) -> Dict[str, Any]:
     """
-    Customize the OpenAPI schema.
+    Customize the OpenAPI schema with comprehensive documentation.
 
     Call this in your FastAPI app:
         app.openapi = lambda: customize_openapi(app)
@@ -30,18 +29,38 @@ def customize_openapi(app: FastAPI) -> Dict[str, Any]:
         title="ZakOps API",
         version="1.0.0",
         description="""
-## ZakOps Deal Lifecycle OS API
+# ZakOps Deal Lifecycle OS API
 
 Backend services for the ZakOps autonomous deal management platform.
 
-### Authentication
+## Overview
 
-Authentication is handled via session cookies. Include credentials in requests.
+ZakOps provides AI-powered deal lifecycle management with:
+- **Deal Management** — Create, track, and manage deals through their lifecycle
+- **Agent Actions** — AI-generated actions with human-in-the-loop approval
+- **Document Storage** — Secure artifact storage with cloud support
+- **Real-time Events** — SSE streaming for live updates
 
-### Response Format
+## Authentication
 
-All successful responses follow this structure:
+Authentication is session-based using cookies.
 
+```bash
+# Login
+curl -X POST /api/auth/login \\
+  -H "Content-Type: application/json" \\
+  -d '{"email": "user@example.com", "password": "secret"}' \\
+  -c cookies.txt
+
+# Use session
+curl /api/deals -b cookies.txt
+```
+
+In development mode (`AUTH_REQUIRED=false`), authentication is optional.
+
+## Response Format
+
+### Success Response
 ```json
 {
   "data": { ... },
@@ -53,27 +72,58 @@ All successful responses follow this structure:
 }
 ```
 
-### Error Format
-
-All error responses follow this structure:
-
+### Error Response
 ```json
 {
   "error": {
-    "code": "ERROR_CODE",
-    "message": "Human-readable message",
-    "details": [...],
-    "trace_id": "abc-123"
+    "code": "NOT_FOUND",
+    "message": "Deal not found",
+    "details": null
+  },
+  "meta": {
+    "trace_id": "abc-123",
+    "timestamp": "2026-01-19T12:00:00Z"
   }
 }
 ```
 
-### Trace Headers
+## Tracing
 
-- `X-Trace-ID`: Include in requests for distributed tracing
-- `X-Correlation-ID`: Include the deal_id for deal-related requests
+Include these headers for distributed tracing:
+- `X-Trace-ID` — Unique request identifier (auto-generated if not provided)
+- `X-Correlation-ID` — Business correlation ID (e.g., deal_id)
+
+## Error Codes
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| `BAD_REQUEST` | 400 | Invalid request format |
+| `VALIDATION_ERROR` | 422 | Request validation failed |
+| `UNAUTHORIZED` | 401 | Authentication required |
+| `FORBIDDEN` | 403 | Permission denied |
+| `NOT_FOUND` | 404 | Resource not found |
+| `CONFLICT` | 409 | Resource conflict |
+| `INTERNAL_ERROR` | 500 | Server error |
+
+## Rate Limiting
+
+Rate limiting is not currently enforced but may be added in future versions.
+
+## Webhooks
+
+Webhook support is planned for future releases.
         """,
         routes=app.routes,
+        tags=[
+            {"name": "health", "description": "Health and readiness checks"},
+            {"name": "auth", "description": "Authentication and session management"},
+            {"name": "deals", "description": "Deal lifecycle management"},
+            {"name": "actions", "description": "Agent actions and approvals"},
+            {"name": "agent", "description": "Agent activity and events"},
+            {"name": "hitl", "description": "Human-in-the-loop workflows"},
+            {"name": "events", "description": "Event streaming and history"},
+            {"name": "artifacts", "description": "Document and file storage"},
+        ]
     )
 
     # Ensure components exists
@@ -82,10 +132,11 @@ All error responses follow this structure:
 
     # Add security scheme
     openapi_schema["components"]["securitySchemes"] = {
-        "cookieAuth": {
+        "sessionAuth": {
             "type": "apiKey",
             "in": "cookie",
-            "name": "session"
+            "name": "zakops_session",
+            "description": "Session cookie obtained from /api/auth/login"
         }
     }
 
@@ -102,14 +153,17 @@ All error responses follow this structure:
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "Machine-readable error code"
+                        "description": "Machine-readable error code",
+                        "example": "NOT_FOUND"
                     },
                     "message": {
                         "type": "string",
-                        "description": "Human-readable error message"
+                        "description": "Human-readable error message",
+                        "example": "Resource not found"
                     },
                     "details": {
                         "type": "array",
+                        "nullable": True,
                         "description": "Additional error details for validation errors",
                         "items": {
                             "type": "object",
@@ -139,9 +193,32 @@ All error responses follow this structure:
                         "description": "When the error occurred"
                     }
                 },
-                "required": ["code", "message", "trace_id"]
-            }
+                "required": ["code", "message"]
+            },
+            "meta": {"$ref": "#/components/schemas/ResponseMeta"}
         }
+    }
+
+    openapi_schema["components"]["schemas"]["ResponseMeta"] = {
+        "type": "object",
+        "properties": {
+            "trace_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Unique trace ID for this request"
+            },
+            "correlation_id": {
+                "type": "string",
+                "nullable": True,
+                "description": "Correlation ID for related requests"
+            },
+            "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Response timestamp"
+            }
+        },
+        "required": ["trace_id", "timestamp"]
     }
 
     openapi_schema["components"]["schemas"]["SuccessResponse"] = {
@@ -150,25 +227,7 @@ All error responses follow this structure:
             "data": {
                 "description": "Response data (type varies by endpoint)"
             },
-            "meta": {
-                "type": "object",
-                "properties": {
-                    "trace_id": {
-                        "type": "string",
-                        "description": "Unique trace ID for this request"
-                    },
-                    "correlation_id": {
-                        "type": "string",
-                        "description": "Correlation ID for related requests"
-                    },
-                    "timestamp": {
-                        "type": "string",
-                        "format": "date-time",
-                        "description": "Response timestamp"
-                    }
-                },
-                "required": ["trace_id", "timestamp"]
-            }
+            "meta": {"$ref": "#/components/schemas/ResponseMeta"}
         }
     }
 
@@ -208,6 +267,23 @@ All error responses follow this structure:
                     }
                 },
                 "required": ["total", "limit", "offset", "has_more", "trace_id"]
+            }
+        }
+    }
+
+    openapi_schema["components"]["schemas"]["PaginatedResponse"] = {
+        "type": "object",
+        "properties": {
+            "data": {"type": "array", "items": {"type": "object"}},
+            "meta": {"$ref": "#/components/schemas/ResponseMeta"},
+            "pagination": {
+                "type": "object",
+                "properties": {
+                    "total": {"type": "integer"},
+                    "page": {"type": "integer"},
+                    "per_page": {"type": "integer"},
+                    "total_pages": {"type": "integer"}
+                }
             }
         }
     }

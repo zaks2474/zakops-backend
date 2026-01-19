@@ -258,22 +258,6 @@ setup_openapi(app)
 
 
 # =============================================================================
-# HEALTH ENDPOINT
-# =============================================================================
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    try:
-        pool = await get_db()
-        async with pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
-        return {"status": "healthy", "database": "connected"}
-    except Exception as e:
-        return {"status": "unhealthy", "database": "disconnected", "error": str(e)}
-
-
-# =============================================================================
 # DEALS ENDPOINTS
 # =============================================================================
 
