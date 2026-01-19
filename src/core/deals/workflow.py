@@ -1,14 +1,15 @@
 """
 Deal Workflow Engine
 
-Manages deal stage transitions with validation and events.
+Manages deal stage transitions with validation, events, and idempotency.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import json
 import logging
 
 from ..database.adapter import get_database
@@ -51,9 +52,10 @@ class StageTransition:
     deal_id: str
     from_stage: str
     to_stage: str
-    transitioned_by: Optional[str]
-    reason: Optional[str]
-    timestamp: datetime
+    transitioned_by: Optional[str] = None
+    reason: Optional[str] = None
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    idempotent_hit: bool = False  # True if this was a duplicate request
 
 
 class DealWorkflowEngine:
@@ -86,16 +88,18 @@ class DealWorkflowEngine:
         self,
         deal_id: str,
         new_stage: str,
+        idempotency_key: Optional[str] = None,
         transitioned_by: Optional[str] = None,
         reason: Optional[str] = None,
         trace_id: Optional[str] = None
     ) -> StageTransition:
         """
-        Transition a deal to a new stage.
+        Transition a deal to a new stage (idempotent).
 
         Args:
             deal_id: Deal ID
             new_stage: Target stage
+            idempotency_key: Unique key for safe retries (recommended)
             transitioned_by: User/agent performing transition
             reason: Reason for transition
             trace_id: Trace ID for correlation
@@ -105,8 +109,50 @@ class DealWorkflowEngine:
 
         Raises:
             ValueError: If transition is invalid
+
+        Idempotency:
+            If idempotency_key matches a recent transition (24h),
+            returns the existing result without making changes.
         """
         db = await get_database()
+
+        # Check idempotency first (before any locks)
+        if idempotency_key:
+            existing = await db.fetchrow(
+                """
+                SELECT details, actor, created_at
+                FROM zakops.deal_events
+                WHERE deal_id = $1
+                  AND idempotency_key = $2
+                  AND event_type = 'stage_changed'
+                  AND created_at > NOW() - INTERVAL '24 hours'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                deal_id, idempotency_key
+            )
+
+            if existing:
+                details = existing.get("details", {})
+                if isinstance(details, str):
+                    try:
+                        details = json.loads(details)
+                    except:
+                        details = {}
+
+                logger.info(
+                    f"Idempotent hit for deal {deal_id}, "
+                    f"key={idempotency_key}, transition={details.get('from_stage')}->{details.get('to_stage')}"
+                )
+                return StageTransition(
+                    deal_id=deal_id,
+                    from_stage=details.get("from_stage", ""),
+                    to_stage=details.get("to_stage", ""),
+                    transitioned_by=existing.get("actor"),
+                    reason=details.get("reason"),
+                    timestamp=existing["created_at"],
+                    idempotent_hit=True
+                )
 
         # Get current stage
         deal = await db.fetchrow(
@@ -118,6 +164,19 @@ class DealWorkflowEngine:
             raise ValueError(f"Deal not found: {deal_id}")
 
         current_stage = deal["stage"]
+
+        # Already in target stage? Return success (idempotent no-op)
+        if current_stage == new_stage:
+            logger.info(f"Deal {deal_id} already in stage {new_stage} (no-op)")
+            return StageTransition(
+                deal_id=deal_id,
+                from_stage=current_stage,
+                to_stage=new_stage,
+                transitioned_by=transitioned_by,
+                reason="Already in target stage (no-op)",
+                timestamp=datetime.now(timezone.utc),
+                idempotent_hit=True
+            )
 
         # Validate transition
         try:
@@ -145,16 +204,25 @@ class DealWorkflowEngine:
             deal_id, new_stage, now
         )
 
-        # Record in deal_events as stage change
+        # Record in deal_events as stage change (with idempotency_key)
+        details_json = json.dumps({
+            "from_stage": current_stage,
+            "to_stage": new_stage,
+            "reason": reason or "",
+            "trace_id": trace_id or ""
+        })
+
         await db.execute(
             """
             INSERT INTO zakops.deal_events
-            (deal_id, event_type, source, actor, details, created_at)
-            VALUES ($1, 'stage_changed', 'workflow', $2, $3::jsonb, $4)
+            (deal_id, event_type, source, actor, actor_type, details, idempotency_key, created_at)
+            VALUES ($1, 'stage_changed', 'workflow', $2, $3, $4::jsonb, $5, $6)
             """,
             deal_id,
             transitioned_by or "system",
-            f'{{"from_stage": "{current_stage}", "to_stage": "{new_stage}", "reason": "{reason or ""}", "trace_id": "{trace_id or ""}"}}',
+            "user" if transitioned_by else "system",
+            details_json,
+            idempotency_key,
             now
         )
 
@@ -183,7 +251,8 @@ class DealWorkflowEngine:
             to_stage=new_stage,
             transitioned_by=transitioned_by,
             reason=reason,
-            timestamp=now
+            timestamp=now,
+            idempotent_hit=False
         )
 
     async def get_stage_history(self, deal_id: str) -> List[Dict[str, Any]]:

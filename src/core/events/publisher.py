@@ -79,13 +79,32 @@ class EventPublisher:
             return await self._publish_to_deal_events(event)
 
     async def _publish_to_deal_events(self, event: EventBase) -> UUID:
-        """Publish event to zakops.deal_events table."""
+        """Publish event to zakops.deal_events table with full audit metadata."""
         db = await self._get_db()
 
         # Get deal_id from event
         deal_id = getattr(event, 'deal_id', None)
         if deal_id is None:
             deal_id = str(event.correlation_id)[:20]  # Use correlation as fallback
+
+        # Get actor metadata
+        actor_id = getattr(event, 'actor_id', None) or event.source or "system"
+        actor_type = getattr(event, 'actor_type', None) or "system"
+        idempotency_key = getattr(event, 'idempotency_key', None)
+
+        # Check idempotency if key provided
+        if idempotency_key:
+            existing = await db.fetchrow(
+                """
+                SELECT id FROM zakops.deal_events
+                WHERE idempotency_key = $1
+                  AND created_at > NOW() - INTERVAL '24 hours'
+                """,
+                idempotency_key
+            )
+            if existing:
+                logger.debug(f"Idempotent event hit: {idempotency_key}")
+                return event.id
 
         # Prepare details with full event data
         details = {
@@ -98,21 +117,26 @@ class EventPublisher:
         await db.execute(
             """
             INSERT INTO zakops.deal_events (
-                deal_id, event_type, source, actor, details, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6)
+                deal_id, event_type, source, actor, actor_id, actor_type,
+                details, idempotency_key, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             """,
             str(deal_id)[:20],
             event.event_type,
             event.source or "system",
-            event.source or "system",
+            actor_id,
+            actor_id,
+            actor_type,
             json.dumps(details),
+            idempotency_key,
             event.created_at
         )
 
         logger.debug(
-            "Published deal event: type=%s deal_id=%s",
+            "Published deal event: type=%s deal_id=%s actor=%s",
             event.event_type,
-            deal_id
+            deal_id,
+            actor_id
         )
 
         return event.id
@@ -310,3 +334,52 @@ async def publish_agent_event(
     return await publisher.publish_agent_event(
         correlation_id, event_type, event_data, run_id, thread_id, source
     )
+
+
+async def get_events_after(
+    last_sequence: int,
+    deal_id: Optional[str] = None,
+    limit: int = 100
+) -> List[dict]:
+    """
+    Get events after a given sequence number.
+
+    Used for SSE replay and event sourcing.
+
+    Args:
+        last_sequence: Get events with sequence > this value
+        deal_id: Optional filter by deal_id
+        limit: Maximum events to return
+
+    Returns:
+        List of events ordered by sequence_number
+    """
+    db = await get_database()
+
+    if deal_id:
+        events = await db.fetch(
+            """
+            SELECT id, deal_id, event_type, source, actor, actor_id, actor_type,
+                   details, sequence_number, created_at
+            FROM zakops.deal_events
+            WHERE sequence_number > $1
+              AND deal_id = $2
+            ORDER BY sequence_number ASC
+            LIMIT $3
+            """,
+            last_sequence, deal_id, limit
+        )
+    else:
+        events = await db.fetch(
+            """
+            SELECT id, deal_id, event_type, source, actor, actor_id, actor_type,
+                   details, sequence_number, created_at
+            FROM zakops.deal_events
+            WHERE sequence_number > $1
+            ORDER BY sequence_number ASC
+            LIMIT $2
+            """,
+            last_sequence, limit
+        )
+
+    return [dict(e) for e in events]
