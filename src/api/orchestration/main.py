@@ -19,6 +19,10 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ConfigDict
 
+# Phase 5: API Stabilization - Middleware imports
+from ..shared.middleware import register_error_handlers, TraceMiddleware
+from ..shared.openapi import setup_openapi
+
 # Configuration
 DB_URL = os.environ.get(
     "DATABASE_URL",
@@ -230,6 +234,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Phase 5: API Stabilization - Error handlers and trace middleware
+register_error_handlers(app)
+app.add_middleware(TraceMiddleware)
+
+# Setup custom OpenAPI schema
+setup_openapi(app)
 
 
 # =============================================================================
